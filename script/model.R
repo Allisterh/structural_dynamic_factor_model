@@ -4,6 +4,9 @@ source("R/modeling/factor_estimation.R")
 source("R/modeling/impulse_responde.R")
 
 
+# Lendo os dados ----
+#' Lendo os dados e ordenando para que fique de acordo com a matrix de restrição
+#' dos fatores, seguindo a metodologia de stock & watson (2016)
 data <- readr::read_csv("data/processed/final_data.csv") |>
   dplyr::select(-ref.date) |>
   tidyr::drop_na() |>
@@ -23,12 +26,31 @@ data <- readr::read_csv("data/processed/final_data.csv") |>
   )
 
 
+# Olhando a base
 dplyr::glimpse(data)
 
+# Determinando o numero de fatores ----
+## Determinando r ----
+
+static_factor <- bai_ng_criteria(data)
+static_factor$r_hat
+
+scree_plot <- scree_analysis(data)
+
+# Bai & ng sugerem usar o IC2 e tanto o IC2 quanto o scree plot, sugere
+# estimar 6 fatores estaticos
 
 
-# Constructing contrains matrix
+## determinando q ----
+dynamic_factor <- amengual_watson(data, static_factor$r_hat$IC2)
+dynamic_factor$q_hat # q = 4 fatores dinamicos
 
+
+
+
+# Constructing contrains matrix ----
+
+# Primeiro vamos separar as varaveis por grupos
 monetary_vars <- c(
   "juros_selic", "juros_cdi", "juros_cdb_rdb",
   "credito_agro", "credito_industria_total", "credito_construcao",
@@ -74,7 +96,7 @@ exchange_vars <- c(
 
 
 
-
+# Juntar tudo em uma lista para aplicar a funçao que cria a matriz de restriçao
 list_groups <- list(
   monetary_vars,
   real_vars,
@@ -87,119 +109,21 @@ list_groups <- list(
 named_factor <- constraint_matrix(list_groups, 6)
 
 
-# Bancada de teste ----
 
 
-#' Plot Structural Impulse Response Functions
-#' @param sirf Array of structural impulse responses
-#' @param variables Variables to plot
-#' @param shocks Shocks to plot
-#' @param horizon Number of periods to plot
-#' @param ci Confidence interval (0-1)
-#' @param se Standard errors matrix (optional)
-plot_sirf <- function(
-    sirf, variables = NULL, shocks = NULL,
-    horizon = NULL, ci = 0.95, se = NULL) {
-  # Get dimensions
-  n_var <- dim(sirf)[1]
-  n_shocks <- dim(sirf)[2]
-  h <- dim(sirf)[3]
+# Testando o medelo ----
 
-  # Print SIRF info for debugging
-  print("SIRF array dimensions:")
-  print(dim(sirf))
-
-  print("Sample SIRF values for first few horizons:")
-  for (t in 1:min(5, h)) {
-    print(paste("Horizon", t - 1))
-    print(sirf[, , t])
-  }
-
-  # Set defaults
-  if (is.null(variables)) variables <- 1:n_var
-  if (is.null(shocks)) shocks <- 1:n_shocks
-  if (is.null(horizon)) horizon <- h - 1
-
-  time <- 0:horizon
-
-  # Create long format data
-  irf_df <- tidyr::crossing(
-    variable = variables,
-    shock = shocks,
-    horizon = time
-  ) |>
-    dplyr::mutate(
-      irf = purrr::map_dbl(
-        1:dplyr::n(),
-        ~ sirf[variable[.x], shock[.x], horizon[.x] + 1]
-      )
-    )
-
-  # Add confidence intervals if SE provided
-  if (!is.null(se)) {
-    irf_df <- irf_df |>
-      dplyr::mutate(
-        ci_lower = irf - stats::qnorm(1 - (1 - ci) / 2) *
-          se[variable, shock, horizon + 1],
-        ci_upper = irf + stats::qnorm(1 - (1 - ci) / 2) *
-          se[variable, shock, horizon + 1]
-      )
-  }
-
-  # Create plots
-  plots <- list()
-  for (s in shocks) {
-    p <- ggplot2::ggplot(
-      dplyr::filter(irf_df, shock == s),
-      ggplot2::aes(x = horizon, y = irf)
-    ) +
-      ggplot2::geom_hline(
-        yintercept = 0, linetype = "dashed",
-        color = "gray50"
-      ) +
-      ggplot2::geom_line(linewidth = 1, color = "steelblue") +
-      {
-        if (!is.null(se)) {
-          ggplot2::geom_ribbon(
-            ggplot2::aes(ymin = ci_lower, ymax = ci_upper),
-            alpha = 0.2,
-            fill = "steelblue"
-          )
-        }
-      } +
-      ggplot2::facet_wrap(~variable, scales = "free_y") +
-      ggplot2::labs(
-        x = "Horizon",
-        y = "Response",
-        title = paste("Responses to Shock", s)
-      ) +
-      ggplot2::theme_bw() +
-      ggplot2::theme(
-        plot.title = ggplot2::element_text(hjust = 0.5),
-        strip.background = ggplot2::element_rect(fill = "white")
-      )
-
-    plots[[s]] <- p
-  }
-
-  return(plots)
-}
-
-
-
-# Testando o medelo
-
-x <- scale(data)
+# Neste primeiro momento, vamos testar o modelo com r=q=6 apenas para ver se
+# tudo roda direitinho
 
 sdfm <- estimate_sdfm(
-  X = x,
+  X = data,
   r = 6,
   p_var = 2,
   constraint_matrix = named_factor,
   group_vars = list_groups,
   horizon = 60
 )
-
 
 
 plots <- plot_sirf(

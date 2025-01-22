@@ -267,6 +267,41 @@ scree_analysis <- function(X, max_comp = 15) {
 
 
 
+
+#' Create a Constraint Matrix from Group List
+#'
+#' @description
+#' Generates a constraint matrix where each group is represented by a column
+#' of ones in a sparse matrix, useful for various statistical and machine
+#' learning applications.
+#'
+#' @param list_groups A list of groups, where each element contains the
+#' members of a specific group.
+#' @param r An integer representing the number of groups (default is 6).
+#' This determines the number of columns in the resulting matrix.
+#'
+#' @return A matrix with binary values, where each group has a column
+#' of ones corresponding to its members, and zeros elsewhere.
+#'
+#' @details
+#' The function creates a constraint matrix by:
+#' 1. Initializing a matrix of zeros for each group
+#' 2. Setting the corresponding group column to ones
+#' 3. Combining these matrices row-wise
+#'
+#' @examples
+#' # Create groups
+#' groups <- list(
+#'   group1 = c("A", "B", "C"),
+#'   group2 = c("D", "E"),
+#'   group3 = c("F", "G", "H")
+#' )
+#'
+#' # Generate constraint matrix
+#' result <- constraint_matrix(groups)
+#' print(result)
+#'
+#' @export
 constraint_matrix <- function(list_groups, r = 6) {
   # Initialize an empty list to store matrices
   constraint_list <- list()
@@ -289,18 +324,61 @@ constraint_matrix <- function(list_groups, r = 6) {
 
 
 
+
+
+
+#' Estimate Factors with Constrained Loadings
+#'
+#' @description
+#' Performs factor estimation using a constrained approach, allowing
+#' specification of group-based loading constraints.
+#'
+#' @param X A matrix or data frame of variables to be factor analyzed
+#'
+#' @param n_factors Number of factors to extract
+#'
+#' @param constraint_info Matrix of predefined constraints for factor loadings
+#'
+#' @param group_vars List of variable groups with predefined constraints
+#'
+#' @param tol Convergence tolerance (default: 1e-8)
+#'
+#' @param max_iter Maximum number of iterations (default: 1000)
+#'
+#' @return A list containing:
+#' - factors: Estimated factor scores
+#' - loadings: Factor loadings matrix
+#' - R2: Overall model R-squared
+#' - R2_series: R-squared for individual variables
+#' - iterations: Number of iterations performed
+#' - objective: Final objective function value
+#' - residuals: Residual matrix
+#'
+#' @details
+#' The function uses an iterative algorithm to estimate factors with
+#' constrained loadings. It begins with standard PCA initialization
+#' and updates factor scores and loadings while respecting specified
+#' group constraints.
+#'
+#' @examples
+#' # Assuming X is your data matrix and you have predefined constraints
+#' result <- estimate_factor(
+#'   X = data_matrix,
+#'   n_factors = 3,
+#'   constraint_info = constraint_matrix,
+#'   group_vars = list_of_groups
+#' )
+#'
+#' @export
 estimate_factor <- function(
     X, n_factors,
     constraint_info,
     group_vars,
     tol = 1e-8,
     max_iter = 1000) {
-  # X: T x N matrix of standardized data
-  # n_factors: number of factors
-  # constraint_info: matrix of constraints for lambda
-  # group_vars: list of variable names for each group
-
-  X <- X |> as.matrix()
+  X <- X |>
+    as.matrix() |>
+    scale()
 
   # Initialize dimensions
   T <- nrow(X)
@@ -398,12 +476,39 @@ estimate_G <- function(F_t, q, p_var = 4) {
 }
 
 
-#' SDFM estimation function to handle both r=q and r>q cases
-#' @param X Matrix of data
-#' @param r Number of static factors
-#' @param q Number of dynamic factors (default = r)
-#' @param p_var VAR lag order (default = 4)
-#' @return List with estimated SDFM components
+
+#' Estimate Structural Dynamic Factor Model (SDFM)
+#'
+#' @description
+#' Estimates a structural dynamic factor model with constrained loadings
+#' and dynamic factor extraction.
+#'
+#' @param X Input data matrix
+#' @param r Number of static factors (default: 8)
+#' @param q Number of dynamic factors (default: equal to r)
+#' @param p_var Lag order for VAR model (default: 4)
+#' @param constraint_matrix Matrix of loading constraints
+#' @param group_vars List of variable groups
+#' @param horizon Forecast horizon for structural impulse response functions
+#'
+#' @return A list containing:
+#' - Lambda: Factor loadings
+#' - F: Factor scores
+#' - G: Transformation matrix (if r > q)
+#' - H: Orthogonalization matrix
+#' - eta: Innovations
+#' - Sigma_eta: Normalized covariance of innovations
+#' - Sigma_e: Error covariance
+#' - var_model: VAR model
+#' - sirf: Structural impulse response functions
+#' - convergence: Model convergence information
+#'
+#' @details
+#' Handles two scenarios:
+#' 1. Standard VAR approach when r = q
+#' 2. Reduced-rank dynamic factor model when r > q
+#'
+#' @export
 estimate_sdfm <- function(
     X, r = 8, q = NULL, p_var = 4,
     constraint_matrix,
