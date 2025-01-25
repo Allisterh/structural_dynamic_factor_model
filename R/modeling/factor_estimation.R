@@ -155,12 +155,16 @@ bai_ng_criteria <- function(X, max_r = 15, standardize = TRUE) {
 #' print(results$q_hat)
 #'
 #' @export
-amengual_watson <- function(X, r, p = 4, max_q = NULL) {
+amengual_watson <- function(X, r, p = 4, max_q = NULL, standardize = TRUE) {
   X <- as.matrix(X)
+
+  if (standardize) {
+    X <- scale(X, center = TRUE, scale = TRUE)
+  }
 
   if (is.null(max_q)) max_q <- r
 
-  pca_X <- prcomp(X, scale. = FALSE)
+  pca_X <- prcomp(X, scale. = FALSE, center = FALSE)
   F_hat <- pca_X$x[, 1:r, drop = FALSE]
 
   T <- nrow(X)
@@ -268,58 +272,22 @@ scree_analysis <- function(X, max_comp = 15) {
 
 
 
-#' Create a Constraint Matrix from Group List
-#'
-#' @description
-#' Generates a constraint matrix where each group is represented by a column
-#' of ones in a sparse matrix, useful for various statistical and machine
-#' learning applications.
-#'
-#' @param list_groups A list of groups, where each element contains the
-#' members of a specific group.
-#' @param r An integer representing the number of groups (default is 6).
-#' This determines the number of columns in the resulting matrix.
-#'
-#' @return A matrix with binary values, where each group has a column
-#' of ones corresponding to its members, and zeros elsewhere.
-#'
-#' @details
-#' The function creates a constraint matrix by:
-#' 1. Initializing a matrix of zeros for each group
-#' 2. Setting the corresponding group column to ones
-#' 3. Combining these matrices row-wise
-#'
-#' @examples
-#' # Create groups
-#' groups <- list(
-#'   group1 = c("A", "B", "C"),
-#'   group2 = c("D", "E"),
-#'   group3 = c("F", "G", "H")
-#' )
-#'
-#' # Generate constraint matrix
-#' result <- constraint_matrix(groups)
-#' print(result)
-#'
-#' @export
-constraint_matrix <- function(list_groups, r = 6) {
-  # Initialize an empty list to store matrices
-  constraint_list <- list()
+constraint_matrix <- function(list_groups, n_factors) {
+  n_groups <- length(list_groups)
+  R <- diag(n_factors)
+  r <- c(rep(1, n_groups), rep(0, n_factors - n_groups))
 
-  # Loop through each group in the list
-  for (i in seq_along(list_groups)) {
-    # Create a matrix of zeros
-    temp <- matrix(0, nrow = length(list_groups[[i]]), ncol = r)
-    # Set the i-th column to 1
-    temp[, i] <- 1
-    # Add the matrix to the constraint_list
-    constraint_list[[i]] <- temp
-  }
+  lambda_constraints <- lapply(seq_along(list_groups), function(i) {
+    tibble::tibble(
+      series = list_groups[[i]],
+      factor_index = i,
+      R = list(R[i, ]),
+      r = r[i]
+    )
+  }) |>
+    dplyr::bind_rows()
 
-  # Combine all matrices row-wise into a single matrix
-  constraint_matrix <- do.call(rbind, constraint_list)
-
-  return(constraint_matrix)
+  return(lambda_constraints)
 }
 
 
@@ -327,96 +295,47 @@ constraint_matrix <- function(list_groups, r = 6) {
 
 
 
-#' Estimate Factors with Constrained Loadings
-#'
-#' @description
-#' Performs factor estimation using a constrained approach, allowing
-#' specification of group-based loading constraints.
-#'
-#' @param X A matrix or data frame of variables to be factor analyzed
-#'
-#' @param n_factors Number of factors to extract
-#'
-#' @param constraint_info Matrix of predefined constraints for factor loadings
-#'
-#' @param group_vars List of variable groups with predefined constraints
-#'
-#' @param tol Convergence tolerance (default: 1e-8)
-#'
-#' @param max_iter Maximum number of iterations (default: 1000)
-#'
-#' @return A list containing:
-#' - factors: Estimated factor scores
-#' - loadings: Factor loadings matrix
-#' - R2: Overall model R-squared
-#' - R2_series: R-squared for individual variables
-#' - iterations: Number of iterations performed
-#' - objective: Final objective function value
-#' - residuals: Residual matrix
-#'
-#' @details
-#' The function uses an iterative algorithm to estimate factors with
-#' constrained loadings. It begins with standard PCA initialization
-#' and updates factor scores and loadings while respecting specified
-#' group constraints.
-#'
-#' @examples
-#' # Assuming X is your data matrix and you have predefined constraints
-#' result <- estimate_factor(
-#'   X = data_matrix,
-#'   n_factors = 3,
-#'   constraint_info = constraint_matrix,
-#'   group_vars = list_of_groups
-#' )
-#'
-#' @export
-estimate_factor <- function(
-    X, n_factors,
-    constraint_info,
-    group_vars,
-    tol = 1e-8,
-    max_iter = 1000) {
-  X <- X |>
-    as.matrix() |>
-    scale()
-
-  # Initialize dimensions
+estimate_factor <- function(X, n_factors, constraint_info, tol = 1e-8, max_iter = 1000) {
+  # Standardize data
+  X <- scale(as.matrix(X))
   T <- nrow(X)
   N <- ncol(X)
 
-  # Get indices for constrained variables
-  constrained_indices <- unlist(lapply(group_vars, function(x) {
-    match(x, colnames(X))
-  }))
-  unconstrained_indices <- setdiff(1:N, constrained_indices)
-
-  # Initialize factors using standard PCA
+  # Initialize with PCA
   svd_result <- svd(X)
   F_hat <- sqrt(T) * svd_result$u[, 1:n_factors]
   Lambda_hat <- matrix(0, N, n_factors)
 
-  # Set initial constrained loadings
-  Lambda_hat[constrained_indices, ] <- constraint_info
+  # Apply initial constraints
+  for (i in seq_len(nrow(constraint_info))) {
+    series_name <- constraint_info$series[i]
+    factor_idx <- constraint_info$factor_index[i]
+    R_i <- unlist(constraint_info$R[i])
+    r_i <- constraint_info$r[i]
 
-  # Initialize objective function value
+    series_idx <- which(colnames(X) == series_name)
+    Lambda_hat[series_idx, ] <- R_i * r_i
+  }
+
+  # Get indices for constrained/unconstrained variables
+  constrained_indices <- which(colnames(X) %in% constraint_info$series)
+  unconstrained_indices <- setdiff(1:N, constrained_indices)
+
+  # Initialize objective function
   V_old <- sum((X - F_hat %*% t(Lambda_hat))^2) / (N * T)
 
   # Iterate until convergence
   for (iter in 1:max_iter) {
-    # Update unconstrained lambdas all at once
+    # Update unconstrained loadings
     Lambda_hat[unconstrained_indices, ] <- t(X[, unconstrained_indices]) %*% F_hat / T
 
-    # Update factors all at once using matrix operations
+    # Update factors
     F_hat <- X %*% Lambda_hat %*% solve(t(Lambda_hat) %*% Lambda_hat)
 
-    # Calculate new objective function value
+    # Calculate new objective
     V_new <- sum((X - F_hat %*% t(Lambda_hat))^2) / (N * T)
 
-    # Check convergence
-    if (abs(V_new - V_old) < tol) {
-      break
-    }
-
+    if (abs(V_new - V_old) < tol) break
     V_old <- V_new
   }
 
@@ -441,31 +360,29 @@ estimate_factor <- function(
 
 
 
-#' Estimate G matrix when r > q
-#' @param F_t Matrix of static factors
-#' @param q Number of dynamic factors
-#' @param p_var VAR lag order
-#' @return List containing G matrix and factor innovations
 estimate_G <- function(F_t, q, p_var = 4) {
   r <- ncol(F_t)
 
-  # Estimate VAR on factors to get innovations
+  # Input validation
+  if (q > r) stop("q must be less than or equal to r")
+  if (q < 1) stop("q must be positive")
+
   var_model <- vars::VAR(F_t, p = p_var)
   factor_innovations <- residuals(var_model)
 
-  # Compute sample covariance of innovations
   Sigma_a <- cov(factor_innovations)
-
-  # Partition Sigma_a
   Sigma_a11 <- Sigma_a[1:q, 1:q]
   Sigma_a21 <- Sigma_a[(q + 1):r, 1:q]
 
-  # Construct G
   G <- matrix(0, r, q)
-  G[1:q, ] <- diag(q) # Upper block is identity matrix
-  G[(q + 1):r, ] <- Sigma_a21 %*% solve(Sigma_a11) # Lower block from regression
+  G[1:q, ] <- diag(q)
+  G[(q + 1):r, ] <- Sigma_a21 %*% solve(Sigma_a11)
 
-  # Get eta_t (q-dimensional innovations)
+  # Validate G dimensions
+  if (!all(dim(G) == c(r, q))) {
+    stop("G matrix has incorrect dimensions")
+  }
+
   eta_t <- factor_innovations[, 1:q]
 
   return(list(

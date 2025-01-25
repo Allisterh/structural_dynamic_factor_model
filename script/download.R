@@ -201,6 +201,77 @@ resultado_mensal <- colunas_interpoladas |>
 
 
 
+# Dados da B3 ----
+
+path_b3_csv <- list.files(
+  path = "data/raw/indexes/",
+  pattern = "*.csv",
+  full.names = TRUE
+)
+
+# Método 1: Usando map do purrr para criar uma lista de dataframes
+
+
+
+indices <- path_b3_csv |>
+  purrr::map(~ readr::read_csv(
+    .x,
+    locale = readr::locale(decimal_mark = ",", grouping_mark = "."),
+    show_col_types = FALSE
+  )) |>
+  purrr::set_names(
+    c(
+      "asset_ibrx100", "asset_imat", "asset_imat", "asset_ifnc",
+      "asset_ifix", "asset_imob", "asset_MLCX", "asset_smll"
+    )
+  ) |>
+  purrr::map(~ .x |>
+    janitor::clean_names() |>
+    dplyr::select(ref.date = data, ultimo)) |>
+  purrr::map(~ .x |>
+    dplyr::mutate(ref.date = lubridate::dmy(ref.date))) |>
+  purrr::imap(~ .x |>
+    dplyr::rename(!!.y := ultimo)) |>
+  purrr::reduce(dplyr::left_join, by = "ref.date")
+
+
+
+# Dados da AMBIMA ----
+
+path_ambima_csv <- list.files(
+  path = "data/raw/mp_index/",
+  pattern = "*.csv",
+  full.names = TRUE
+)
+
+
+
+mp_indexes <- path_ambima_csv |>
+  purrr::map(~ readr::read_csv(
+    .x,
+    show_col_types = FALSE
+  )) |>
+  purrr::set_names(
+    c(
+      "ida_di", "idk_1a", "idk_2a", "idk_3a",
+      "idk_3m", "idk_5a"
+    )
+  ) |>
+  purrr::map(~ .x |>
+    janitor::clean_names() |>
+    dplyr::select(ref.date = data_de_referencia, numero_indice)) |>
+  purrr::map(~ .x |>
+    dplyr::mutate(ref.date = lubridate::dmy(ref.date))) |>
+  purrr::imap(~ .x |>
+    dplyr::rename(!!.y := numero_indice)) |>
+  purrr::reduce(dplyr::left_join, by = "ref.date")
+
+
+
+
+
+
+
 # Juntando tudo em apenas um df ----
 
 all_dfs <- list(
@@ -211,13 +282,16 @@ all_dfs <- list(
   emprego = emprego,
   inflacao = inflacao,
   commodity = commodity,
-  tempo_procura = resultado_mensal
+  tempo_procura = resultado_mensal,
+  indices = indices,
+  mp_indexes = mp_indexes
 )
 
 merged_df <- all_dfs |>
-  purrr::reduce(~ dplyr::left_join(.x, .y, by = "ref.date")) |>
+  purrr::reduce(dplyr::left_join, by = "ref.date") |>
   dplyr::arrange(ref.date) |>
   tidyr::drop_na()
+
 
 
 # dados vão até jan/2024 por causa do cdb_rdb

@@ -54,20 +54,20 @@ check_if_final_was_removed <- check_seasonality(data)
 
 # Apply log transformation in nominal variables ----
 
-data <- data |>
-  dplyr::mutate(
-    dplyr::across(
-      .cols = c(
-        dplyr::contains("credito"),
-        dplyr::contains("consumo"),
-        dplyr::contains("veiculos"),
-        dplyr::contains("caged"),
-        dplyr::contains("pop"),
-        dplyr::contains("trab")
-      ),
-      .fns = ~ log(.x)
-    )
-  )
+# data <- data |>
+#   dplyr::mutate(
+#     dplyr::across(
+#       .cols = c(
+#         dplyr::contains("credito"),
+#         dplyr::contains("consumo"),
+#         dplyr::contains("veiculos"),
+#         dplyr::contains("caged"),
+#         dplyr::contains("pop"),
+#         dplyr::contains("trab")
+#       ),
+#       .fns = ~ log(.x)
+#     )
+#   )
 
 
 
@@ -83,3 +83,5 @@ print(unity_root_test)
 final_data <- remove_unit_root(data, max_diff = 5)
 
 # readr::write_csv(final_data$data, "data/processed/final_data.csv")
+
+final_data$control$times_diff
