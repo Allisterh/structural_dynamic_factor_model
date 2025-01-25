@@ -221,7 +221,7 @@ indices <- path_b3_csv |>
   )) |>
   purrr::set_names(
     c(
-      "asset_ibrx100", "asset_imat", "asset_imat", "asset_ifnc",
+      "asset_ibrx100", "asset_imat", "asset_indx", "asset_ifnc",
       "asset_ifix", "asset_imob", "asset_MLCX", "asset_smll"
     )
   ) |>
@@ -267,6 +267,13 @@ mp_indexes <- path_ambima_csv |>
   purrr::reduce(dplyr::left_join, by = "ref.date")
 
 
+mp_indexes_monthly <- mp_indexes |>
+  dplyr::mutate(year_month = lubridate::floor_date(ref.date, "month")) |>
+  dplyr::group_by(year_month) |>
+  dplyr::slice_tail(n = 1) |>
+  dplyr::ungroup() |>
+  dplyr::select(-ref.date) |>
+  dplyr::rename(ref.date = year_month)
 
 
 
@@ -284,7 +291,7 @@ all_dfs <- list(
   commodity = commodity,
   tempo_procura = resultado_mensal,
   indices = indices,
-  mp_indexes = mp_indexes
+  mp_indexes = mp_indexes_monthly
 )
 
 merged_df <- all_dfs |>
@@ -292,7 +299,7 @@ merged_df <- all_dfs |>
   dplyr::arrange(ref.date) |>
   tidyr::drop_na()
 
-
+nrow(merged_df)
 
 # dados vão até jan/2024 por causa do cdb_rdb
 # readr::write_csv(merged_df, "data/raw/raw_data.csv")

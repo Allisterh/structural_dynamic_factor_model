@@ -7,18 +7,42 @@ raw_data <- readr::read_csv("data/raw/raw_data.csv")
 
 
 
+# Apply log transformation in nominal variables ----
+
+data <- raw_data |>
+  dplyr::mutate(
+    dplyr::across(
+      .cols = c(
+        dplyr::contains("credito"),
+        dplyr::contains("consumo"),
+        dplyr::contains("veiculos"),
+        dplyr::contains("caged"),
+        dplyr::contains("pop"),
+        dplyr::contains("trab"),
+        -c(trab_tx_desemprego, trab_razao_vagas_desempregados),
+        dplyr::contains("ida_"),
+        dplyr::contains("idka")
+      ),
+      .fns = ~ log(.x)
+    )
+  )
+
+
+
+
+
 # Treating data seasonality ----
 
-season_result <- check_seasonality(raw_data)
+season_result <- check_seasonality(data)
 
 
-data_no_season <- raw_data |>
+data_no_season <- data |>
   dplyr::select(dplyr::matches(season_result$season_vars)) |>
   purrr::map(
     ~ ts(
       .x,
       start = c(
-        lubridate::year(min(raw_data$ref.date)),
+        lubridate::year(min(data$ref.date)),
         1
       ),
       frequency = 12
@@ -35,39 +59,20 @@ data_no_season <- raw_data |>
 
 
 # Create new dataframe using tidyverse approach
-data <- raw_data |>
+data <- data |>
   dplyr::mutate(
     dplyr::across(
-      # Select columns that match the seasonal variables
       dplyr::all_of(season_result$season_vars),
-      # Replace with seasonally adjusted values
       ~ data_no_season[[dplyr::cur_column()]]
     )
   )
 
 # Verify the seasonality was removed
 check_if_final_was_removed <- check_seasonality(data)
+print(check_if_final_was_removed)
 # Yes, it was
 
 
-
-
-# Apply log transformation in nominal variables ----
-
-# data <- data |>
-#   dplyr::mutate(
-#     dplyr::across(
-#       .cols = c(
-#         dplyr::contains("credito"),
-#         dplyr::contains("consumo"),
-#         dplyr::contains("veiculos"),
-#         dplyr::contains("caged"),
-#         dplyr::contains("pop"),
-#         dplyr::contains("trab")
-#       ),
-#       .fns = ~ log(.x)
-#     )
-#   )
 
 
 
@@ -83,5 +88,3 @@ print(unity_root_test)
 final_data <- remove_unit_root(data, max_diff = 5)
 
 # readr::write_csv(final_data$data, "data/processed/final_data.csv")
-
-final_data$control$times_diff
