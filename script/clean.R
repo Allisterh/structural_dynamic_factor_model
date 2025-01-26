@@ -1,3 +1,5 @@
+rm(list = ls())
+
 source("R/preprocessing/seasonality.R")
 source("R/preprocessing/stationarity.R")
 
@@ -19,9 +21,7 @@ data <- raw_data |>
         dplyr::contains("caged"),
         dplyr::contains("pop"),
         dplyr::contains("trab"),
-        -c(trab_tx_desemprego, trab_razao_vagas_desempregados),
-        dplyr::contains("ida_"),
-        dplyr::contains("idka")
+        -c(trab_tx_desemprego, trab_razao_vagas_desempregados)
       ),
       .fns = ~ log(.x)
     )
