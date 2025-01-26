@@ -1,6 +1,7 @@
 # Getting auxiliary functions ----
 source("R/data_download/bcb.R")
 source("R/data_download/exchange.R")
+source("R/modeling/svensson_model.R")
 
 
 # Taxa de cambio ----
@@ -236,46 +237,24 @@ indices <- path_b3_csv |>
 
 
 
-# Dados da AMBIMA ----
+# Série dos titulos de maturidade Fixa ----
 
-path_ambima_csv <- list.files(
-  path = "data/raw/mp_index/",
-  pattern = "*.csv",
-  full.names = TRUE
-)
+# Definir o título de interesse
+titulos <- c("LTN")
 
-
-
-mp_indexes <- path_ambima_csv |>
-  purrr::map(~ readr::read_csv(
-    .x,
-    show_col_types = FALSE
-  )) |>
-  purrr::set_names(
-    c(
-      "ida_di", "idk_1a", "idk_2a", "idk_3a",
-      "idk_3m", "idk_5a"
-    )
-  ) |>
-  purrr::map(~ .x |>
-    janitor::clean_names() |>
-    dplyr::select(ref.date = data_de_referencia, numero_indice)) |>
-  purrr::map(~ .x |>
-    dplyr::mutate(ref.date = lubridate::dmy(ref.date))) |>
-  purrr::imap(~ .x |>
-    dplyr::rename(!!.y := numero_indice)) |>
-  purrr::reduce(dplyr::left_join, by = "ref.date")
+# Baixar os dados dos títulos
+dados_tesouro <- GetTDData::td_get(titulos) |> suppressMessages()
 
 
-mp_indexes_monthly <- mp_indexes |>
-  dplyr::mutate(year_month = lubridate::floor_date(ref.date, "month")) |>
-  dplyr::group_by(year_month) |>
+# Aplicar o modelo aos dados
+fixed_maturity <- generate_fixed_maturity_series(dados_tesouro)
+
+monthly_fixed_maturity_yield <- fixed_maturity |>
+  dplyr::group_by(mes = lubridate::floor_date(data, "month")) |>
   dplyr::slice_tail(n = 1) |>
   dplyr::ungroup() |>
-  dplyr::select(-ref.date) |>
-  dplyr::rename(ref.date = year_month)
-
-
+  dplyr::select(-data) |>
+  dplyr::rename(ref.date = mes)
 
 
 
@@ -291,7 +270,7 @@ all_dfs <- list(
   commodity = commodity,
   tempo_procura = resultado_mensal,
   indices = indices,
-  mp_indexes = mp_indexes_monthly
+  fixed_maturity_yield = monthly_fixed_maturity_yield
 )
 
 merged_df <- all_dfs |>
@@ -300,6 +279,7 @@ merged_df <- all_dfs |>
   tidyr::drop_na()
 
 nrow(merged_df)
+ncol(merged_df)
 
 # dados vão até jan/2024 por causa do cdb_rdb
 # readr::write_csv(merged_df, "data/raw/raw_data.csv")

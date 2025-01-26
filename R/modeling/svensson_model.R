@@ -144,7 +144,6 @@ fit_svensson <- function(maturities, rates) {
 #' # Assuming dados_tesouro is a data frame with required columns
 #' fixed_rates <- generate_fixed_maturity_series(dados_tesouro)
 #'
-#' @importFrom dplyr |> mutate filter
 #' @export
 generate_fixed_maturity_series <- function(dados_tesouro) {
   # Preparar os dados
