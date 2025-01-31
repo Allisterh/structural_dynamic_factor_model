@@ -1,56 +1,206 @@
-# Modelo de Fator Dinâmico Estrutural em R
+# Análise de Choques de Política Monetária usando SDFM
 
-Este projeto implementa um modelo de fator dinâmico estrutural (SDFM - Structural Dynamic Factor Model) em R para analisar choques da politica monetária no preço dos ativos, seguindo a metodologia de Stock & Watson (2016). 
+Este repositório contém o código e os dados utilizados no artigo das disciplinas de Macroeconomia II e Econometria II, ministradas pelos professores João Caldeira e Guilherme Moura na UFSC.
 
-## Dados
+## Visão Geral
 
-- Dados brutos são baixados de múltiplas fontes em `download.R`:
-  - Taxas de câmbio do Yahoo Finance
-  - Várias séries do Banco Central do Brasil 
-  - Índices de commodities
-  - Dados de emprego do SIDRA
-- Os dados são pré-processados em `clean.R`:
-  - Sazonalidade é removida usando X-13ARIMA-SEATS
-  - Variáveis nominais são transformadas em log
-  - Testes de raiz unitária são realizados, diferenciação aplicada para alcançar estacionariedade
-  - Dados processados finais salvos em `final_data.csv`
+O projeto investiga os efeitos da política monetária sobre diversos preços de ativos no Brasil através de um Modelo de Fatores Dinâmicos Estrutural. A análise captura a resposta de diferentes ativos financeiros (ações, títulos, câmbio) a choques de política monetária, abordando o problema da não-fundamentalidade comum em modelos VAR tradicionais.
 
-## Estimação do Modelo de Fatores
+## Estrutura do Projeto
 
-- `factor_estimation.R` contém funções para:
-  - Determinar o número de fatores via critérios de Bai & Ng (2002)
-  - Estimar o número de fatores dinâmicos via Amengual & Watson (2007)
-  - Estimar o modelo de fator com restrições na matriz de cargas
-- O modelo é estimado em `model.R`:
-  - 6 fatores, 2 defasagens no VAR
-  - Restrições de identificação impõem uma estrutura de blocos nas cargas
-  - Separa atividade real, preços, variáveis monetárias
-  - Estimado via mínimos quadrados iterativos
-- Usa as normalizações de "unit effect" e "named factor" de Stock & Watson para identificar os choques estruturais e escala dos fatores:
-  - "Unit effect" (Seção 4.1.3): define que um choque estrutural unitário causa um aumento contemporâneo de uma unidade em uma variável observada específica. Equação (32) formaliza isso como H_jj = 1.  
-  - "Named factor" (Seção 2.1.3.2): associa cada fator a uma variável específica, normalizando as cargas dos fatores. Equação (12) mostra a forma da matriz Lambda sob essa normalização.
+```
+├── R/
+│   ├── data_download/        # Scripts para coleta de dados
+│   │   ├── bcb.R            # Download de dados do Banco Central
+│   │   └── exchange.R       # Download de taxas de câmbio
+│   ├── preprocessing/        # Limpeza e transformação de dados
+│   │   ├── seasonality.R    # Testes e ajustes de sazonalidade
+│   │   └── stationarity.R   # Testes de raiz unitária
+│   ├── modeling/            # Scripts principais de modelagem
+│   │   ├── factor_estimation.R     # Funções de estimação SDFM
+│   │   ├── impulse_response.R      # Cálculo e plotagem de IRF
+│   │   └── svensson_model.R        # Estimação da curva de juros
+│   └── clean.R              # Script principal de preparação
+├── data/
+│   ├── raw/                 # Dados originais baixados
+│   └── processed/           # Dados limpos e transformados
+└── img/                     # Gráficos e figuras gerados
+```
 
-## Análise Estrutural
+## Descrição Detalhada dos Scripts
 
-- Choques estruturais identificados via restrições zero na matriz de impacto
-- Normalização de "unit effect" usada para definir a escala
-- Quando o número de fatores dinâmicos (q) < fatores estáticos (r), estima a matriz 'G'
-- IRFs estruturais computadas por `compute_SIRF()` em `impulse_responde.R`, seguindo a equação (58) do artigo: 
-  - X_t = Lambda * Phi(L)^(-1) * G * H * eps_t + e_t
-  - Lambda é a matriz de cargas, Phi(L) são os coeficientes do VAR dos fatores, G é a matriz que relaciona os choques eta aos fatores, e H é a matriz de impacto
-- Alguns bugs permanecem no cálculo da SIRF: 
-  - Todos os choques têm o mesmo impacto nos fatores independente das restrições
-  - O problema provavelmente está no cálculo da representação de médias móveis (coeficientes C_h na função `compute_SIRF()`)
-  - Tentei calcular as irf com base no método utilizado pelo pacote `vars`
+### Scripts de Download de Dados (data_download/)
 
-## Próximos Passos
+#### bcb.R
+- Função `download_bcb_data()`: 
+  - Download de séries temporais do BCB usando a API
+  - Permite download paralelo para múltiplas séries
+  - Organiza dados em formato wide
+  - Parâmetros principais:
+    - `id`: Códigos das séries do BCB
+    - `start_date`: Data inicial
+    - `end_date`: Data final
+    - `parallel`: Opção de processamento paralelo
 
-- Debugar o cálculo da SIRF, focar na recursão para os coeficientes MA
-- Considerar esquemas de identificação alternativos
-- Reportar decomposições de variância
-- Analisar transmissões de choques específicos de interesse
+#### exchange.R
+- Função `download_cambio()`:
+  - Download de taxas de câmbio via Yahoo Finance
+  - Calcula médias mensais
+  - Formata dados para análise
+  - Parâmetros:
+    - `currency_tickers`: Códigos das moedas
+    - `base_currency`: Moeda base (default: BRL)
+
+### Scripts de Pré-processamento (preprocessing/)
+
+#### seasonality.R
+- Função `check_seasonality()`:
+  - Testa sazonalidade em séries temporais
+  - Usa testes QS, Friedman e Kruskal-Wallis
+  - Retorna diagnóstico detalhado
+  - Identifica variáveis que precisam de ajuste sazonal
+
+#### stationarity.R
+- Funções principais:
+  - `adf_test()`: Implementa teste ADF com diferentes especificações
+  - `remove_unit_root()`: Aplica diferenciação sequencial
+  - Implementa testes de raiz unitária em painel
+  - Retorna controle de transformações aplicadas
+
+### Scripts de Modelagem (modeling/)
+
+#### factor_estimation.R
+- Implementa funções essenciais para SDFM:
+  - `bai_ng_criteria()`: Determina número de fatores estáticos
+  - `amengual_watson()`: Estima fatores dinâmicos
+  - `estimate_dfm()`: Estima o modelo completo
+  - Inclui correção de Kilian para VAR
+
+#### impulse_response.R
+- Funções para análise de impulso-resposta:
+  - `compute_irf_dfm()`: Calcula IRFs do modelo
+  - `plot_irf()`: Gera gráficos com bandas de confiança
+  - Implementa bootstrap para intervalos de confiança
+
+#### svensson_model.R
+- Implementa modelo de Svensson para curva de juros:
+  - `svensson_rate()`: Calcula taxas para maturidades específicas
+  - `fit_svensson()`: Estima parâmetros do modelo
+  - `generate_fixed_maturity_series()`: Gera séries de taxas fixas
+
+### Script Principal (clean.R)
+- Orquestra todo o processo de limpeza:
+  - Carrega e organiza dados brutos
+  - Aplica transformações necessárias
+  - Trata sazonalidade e estacionariedade
+  - Prepara dados para estimação do modelo
+
+## Metodologia Detalhada
+
+### 1. Preparação dos Dados
+
+#### 1.1 Teste e Ajuste de Sazonalidade
+- Aplicação de testes combinados:
+  - Teste QS para periodicidade sazonal
+  - Teste de Friedman para variação sazonal não-paramétrica
+  - Teste de Kruskal-Wallis para diferenças sazonais
+- Ajuste via procedimento X-11 ARIMA quando necessário
+
+#### 1.2 Tratamento de Estacionariedade
+- Testes de raiz unitária:
+  - Teste ADF individual para cada série
+  - Testes em painel (Maddala-Wu, Choi, Levin-Lin-Chu)
+- Diferenciação sequencial quando necessário
+- Controle de transformações aplicadas
+
+#### 1.3 Construção da Curva de Juros
+- Implementação do modelo de Svensson:
+  - Estimação de parâmetros via otimização L-BFGS-B
+  - Interpolação para maturidades fixas
+  - Construção de séries temporais consistentes
+
+### 2. Estimação do Modelo
+
+#### 2.1 Determinação do Número de Fatores
+- Fatores estáticos:
+  - Critérios de informação de Bai-Ng (IC1, IC2, IC3)
+  - Análise de scree plot
+  - Decomposição da variância explicada
+
+- Fatores dinâmicos:
+  - Procedimento de Amengual-Watson
+  - Análise de robustez com diferentes especificações
+
+#### 2.2 Estimação do SDFM
+1. Extração de fatores estáticos via PCA
+2. Modelagem VAR dos fatores com correção de Kilian
+3. Identificação de choques estruturais:
+   - Decomposição espectral
+   - Normalização de efeito unitário
+   - Decomposição de Cholesky
+
+#### 2.3 Análise de Impulso-Resposta
+- Cálculo de IRFs estruturais
+- Bootstrap wild com 800 replicações
+- Construção de bandas de confiança
+- Horizonte de análise de 50 períodos
+
+### 3. Análise e Diagnóstico
+
+#### 3.1 Testes de Robustez
+- Análise de sensibilidade ao número de fatores
+- Testes de estacionariedade em painel
+- Diagnóstico de especificação do modelo
+
+#### 3.2 Visualização de Resultados
+- Gráficos de impulso-resposta com bandas de confiança
+- Decomposição da variância
+- Análise das cargas fatoriais
+
+## Resultados Principais
+
+- Queda imediata de ~3% no mercado acionário após choque contracionista
+- Apreciação de 8% na taxa USD/BRL
+- Aumentos significativos nos yields de diferentes maturidades
+- Efeitos mais fortes em ativos mais arriscados e setor imobiliário
+- Respostas assimétricas entre diferentes classes de ativos
+
+## Instalação
+
+1. Clone o repositório:
+```bash
+git clone https://github.com/seuperfil/choques-monetarios.git
+```
+
+2. Instale os pacotes R necessários:
+```R
+install.packages(c(
+    "tidyverse", "GetBCBData", "tidyquant", "seasonal",
+    "tseries", "zoo", "moments", "ggplot2", "patchwork"
+))
+```
+
+## Como Usar
+
+1. Coleta de Dados:
+```R
+source("R/data_download/bcb.R")
+source("R/data_download/exchange.R")
+```
+
+2. Pré-processamento:
+```R
+source("R/clean.R")
+```
+
+3. Estimação do Modelo:
+```R
+source("R/modeling/factor_estimation.R")
+```
+
 
 ## Referências 
 
+- ALESSI, L.; KERSSENFISCHER, M. The response of asset prices to monetary policy shocks: Stronger than thought. Journal of Applied Econometrics, v. 34, n. 5, p. 661–672, 2019. Disponível em: <https://onlinelibrary.wiley.com/doi/abs/10.1002/jae.2706>.
+
 - Stock, J. H., & Watson, M. W. (2016). Dynamic factor models, factor-augmented vector autoregressions, and structural vector autoregressions in macroeconomics. In Handbook of macroeconomics (Vol. 2, pp. 415-525). Elsevier.
-- Códigos em MATLAB dos autores: http://www.princeton.edu/~mwatson/ddisk/Stock_Watson_DFM_HOM_replication_files_20160312.zip
