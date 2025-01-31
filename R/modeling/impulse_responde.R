@@ -1,131 +1,141 @@
-#' Compute Structural Impulse Response Functions (SIRF)
-#'
-#' @description
-#' Calculates structural impulse response functions for a VAR model
-#' with optional factor transformation.
-#'
-#' @param Lambda Factor loading matrix
-#' @param var_model VAR model object
-#' @param G Optional transformation matrix (default: NULL)
-#' @param H Orthogonalization matrix
-#' @param horizon Forecast horizon (default: 40)
-#'
-#' @return A 3D array of structural impulse response functions
-#'
-#' @details
-#' Computes impulse response functions using VAR model coefficients
-#' and orthogonalization matrices. Handles both standard and
-#' reduced-rank factor models.
-#'
-#' @export
-compute_SIRF <- function(Lambda, var_model, G = NULL, H, horizon = 40) {
-  A_coef <- vars::Acoef(var_model)
-  r <- nrow(A_coef[[1]])
-  p <- length(A_coef)
-  n <- nrow(Lambda)
+compute_irf_dfm <- function(dfm_results, h = 24, nboot = 300) {
+  # Extract components
+  Lambda <- dfm_results$static_loadings
+  A <- dfm_results$companion_matrix
+  K <- dfm_results$dynamic_loadings
+  M <- dfm_results$dynamic_scaling
+  sy <- dfm_results$data_sd
 
-  # Inicializar SIRF e C
-  SIRF <- array(0, dim = c(n, ncol(H), horizon + 1))
-  C <- array(0, dim = c(r, r, horizon + 1))
-  C[, , 1] <- diag(r)
+  # Dimensions
+  n_vars <- nrow(Lambda)
+  r <- ncol(Lambda)
+  q <- ncol(K)
 
-  # Recursão corrigida para coeficientes MA
-  for (h in 1:horizon) {
-    temp <- matrix(0, r, r)
-    for (j in 1:min(h, p)) {
-      temp <- temp + A_coef[[j]] %*% C[, , h - j + 1]
-    }
-    C[, , h + 1] <- temp
+  # Normalize standard deviations and shock size as in MATLAB
+  shock_size <- 5 # 50 basis points
+  sy_normalized <- sy * 100 # Convert to percentage changes
+
+  # Point IRF
+  irf_point <- array(0, dim = c(n_vars, h + 1, q))
+  B <- array(0, dim = c(r, r, h + 1))
+  B[, , 1] <- diag(r)
+  B[, , 2] <- A[1:r, 1:r]
+
+  for (i in 3:(h + 1)) {
+    B[, , i] <- A[1:r, 1:r] %*% B[, , i - 1]
   }
 
-  # Computar SIRF
-  if (is.null(G)) {
-    for (h in 1:(horizon + 1)) {
-      SIRF[, , h] <- Lambda %*% C[, , h] %*% H
-    }
-  } else {
-    for (h in 1:(horizon + 1)) {
-      SIRF[, , h] <- Lambda %*% C[, , h] %*% G %*% H
+  # Calculate point IRF with correct normalization
+  for (s in 1:q) {
+    for (i in 1:(h + 1)) {
+      temp <- Re((Lambda %*% B[, , i] %*% K %*% M))
+      # Scale to get percentage changes
+      irf_point[, i, s] <- temp[, s] * sy_normalized * shock_size
     }
   }
 
-  return(SIRF)
+  # Bootstrap with same normalization
+  irf_boot <- array(0, dim = c(n_vars, h + 1, nboot, q))
+  rr <- matrix(1 - 2 * (runif(nrow(dfm_results$var_residuals) * nboot) > 0.5),
+    nrow = nrow(dfm_results$var_residuals),
+    ncol = nboot
+  )
+
+  for (b in 1:nboot) {
+    resid_boot <- dfm_results$var_residuals * rr[, b]
+
+    F_boot <- matrix(0, nrow = nrow(dfm_results$static_factors), ncol = r)
+    F_boot[1, ] <- dfm_results$static_factors[1, ]
+
+    for (t in 2:nrow(F_boot)) {
+      F_boot[t, ] <- A[1:r, 1:r] %*% F_boot[t - 1, ] + resid_boot[t - 1, ]
+    }
+
+    var_boot <- estimate_corrected_var(F_boot, 1)
+    A_boot <- var_boot$companion
+
+    B_boot <- array(0, dim = c(r, r, h + 1))
+    B_boot[, , 1] <- diag(r)
+    B_boot[, , 2] <- A_boot[1:r, 1:r]
+
+    for (i in 3:(h + 1)) {
+      B_boot[, , i] <- A_boot[1:r, 1:r] %*% B_boot[, , i - 1]
+    }
+
+    for (s in 1:q) {
+      for (i in 1:(h + 1)) {
+        temp <- Re((Lambda %*% B_boot[, , i] %*% K %*% M))
+        irf_boot[, i, b, s] <- temp[, s] * sy_normalized * shock_size
+      }
+    }
+  }
+
+  # Confidence intervals
+  irf_ci <- array(0, dim = c(n_vars, h + 1, 5, q))
+  for (s in 1:q) {
+    irf_ci[, , 1, s] <- apply(irf_boot[, , , s], c(1, 2), quantile, probs = 0.05)
+    irf_ci[, , 2, s] <- apply(irf_boot[, , , s], c(1, 2), quantile, probs = 0.10)
+    irf_ci[, , 3, s] <- irf_point[, , s]
+    irf_ci[, , 4, s] <- apply(irf_boot[, , , s], c(1, 2), quantile, probs = 0.90)
+    irf_ci[, , 5, s] <- apply(irf_boot[, , , s], c(1, 2), quantile, probs = 0.95)
+  }
+
+  return(irf_ci)
 }
 
+plot_irf <- function(irf_results, response_vars, shock = 3, horizon = 20) {
+  # Criar lista para armazenar os plots individuais
+  plot_list <- list()
 
+  # Loop através das variáveis de resposta
+  for (i in seq_along(response_vars)) {
+    var_index <- as.numeric(response_vars[[i]])
+    var_name <- names(response_vars[[i]])
 
-#' Plot Structural Impulse Response Functions (SIRF)
-#'
-#' @description
-#' Generates plots of structural impulse response functions for specified
-#' variables and shocks.
-#'
-#' @param sirf 3D array of structural impulse response functions
-#' @param variables Indices of variables to plot (default: all variables)
-#' @param shocks Indices of shocks to plot (default: all shocks)
-#' @param horizon Maximum time horizon to plot (default: full horizon)
-#'
-#' @return A list of ggplot2 plot objects, one for each shock
-#'
-#' @details
-#' Creates line plots showing the response of each variable to specific
-#' structural shocks across different time horizons.
-#'
-#' @export
-plot_sirf <- function(
-    sirf, variables = NULL, shocks = NULL,
-    horizon = NULL) {
-  # Get dimensions
-  n_var <- dim(sirf)[1]
-  n_shocks <- dim(sirf)[2]
-  h <- dim(sirf)[3]
-
-  # Set defaults
-  if (is.null(variables)) variables <- 1:n_var
-  if (is.null(shocks)) shocks <- 1:n_shocks
-  if (is.null(horizon)) horizon <- h - 1
-
-  time <- 0:horizon
-
-  # Create long format data
-  irf_df <- tidyr::crossing(
-    variable = variables,
-    shock = shocks,
-    horizon = time
-  ) |>
-    dplyr::mutate(
-      irf = purrr::map_dbl(
-        1:dplyr::n(),
-        ~ sirf[variable[.x], shock[.x], horizon[.x] + 1]
-      )
+    df_plot <- data.frame(
+      tempo = seq_len(horizon + 1) - 1,
+      irf = irf_results[var_index, seq_len(horizon + 1), 3, shock],
+      ic_05 = irf_results[var_index, seq_len(horizon + 1), 1, shock],
+      ic_10 = irf_results[var_index, seq_len(horizon + 1), 2, shock],
+      ic_90 = irf_results[var_index, seq_len(horizon + 1), 4, shock],
+      ic_95 = irf_results[var_index, seq_len(horizon + 1), 5, shock]
     )
 
-  # Create plots
-  plots <- list()
-  for (s in shocks) {
-    p <- ggplot2::ggplot(
-      dplyr::filter(irf_df, shock == s),
-      ggplot2::aes(x = horizon, y = irf)
-    ) +
-      ggplot2::geom_hline(
-        yintercept = 0, linetype = "dashed",
-        color = "gray50"
+    plot_list[[i]] <- ggplot2::ggplot(df_plot, ggplot2::aes(x = tempo)) +
+      ggplot2::geom_ribbon(
+        ggplot2::aes(ymin = ic_05, ymax = ic_95),
+        fill = "grey90", alpha = 0.5
       ) +
-      ggplot2::geom_line(linewidth = 1, color = "steelblue") +
-      ggplot2::facet_wrap(~variable, scales = "free_y") +
-      ggplot2::labs(
-        x = "Horizon",
-        y = "Response",
-        title = paste("Responses to Shock", s)
+      ggplot2::geom_ribbon(
+        ggplot2::aes(ymin = ic_10, ymax = ic_90),
+        fill = "grey70", alpha = 0.5
       ) +
-      ggplot2::theme_bw() +
+      ggplot2::geom_line(
+        ggplot2::aes(y = irf),
+        color = "black",
+        linewidth = 1
+      ) +
+      ggplot2::geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+      ggplot2::theme_classic() +
+      ggplot2::labs(y = var_name) +
       ggplot2::theme(
-        plot.title = ggplot2::element_text(hjust = 0.5),
-        strip.background = ggplot2::element_rect(fill = "white")
+        axis.title.x = ggplot2::element_blank(),
+        axis.title.y = ggplot2::element_text(size = ggplot2::rel(1.4)),
+        axis.text = ggplot2::element_text(size = ggplot2::rel(1.2)),
+        plot.title = ggplot2::element_blank()
+      ) +
+      ggplot2::annotate(
+        "text",
+        x = Inf,
+        y = mean(range(df_plot$ic_95, df_plot$ic_05)),
+        label = var_name,
+        hjust = 0,
+        vjust = 0.5
       )
-
-    plots[[s]] <- p
   }
 
-  return(plots)
+  # Combinar os plots em um grid vertical
+  combined_plot <- patchwork::wrap_plots(plot_list, ncol = 2)
+
+  return(combined_plot)
 }

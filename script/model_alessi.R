@@ -20,255 +20,32 @@ data <- readr::read_csv("data/processed/final_data.csv") |>
     dplyr::contains("commodity_"),
     dplyr::contains("juros_"),
     dplyr::contains("titulo_"),
+    retorno_mensal,
     dplyr::contains("spread_"),
     dplyr::contains("credito_"),
     dplyr::contains("asset_")
   ) |>
   as.matrix()
 
+colnames(data)[colnames(data) == "retorno_mensal"] <- "ida"
+
 
 # determinando o numero de fatores ----
 bai_ng <- bai_ng_criteria(data, standardize = TRUE)
-
+bai_ng$r_hat
 
 
 amengual <- amengual_watson(data, r = 7, p = 1, scale = TRUE)
-
-r <- 7
-q <- 5
+amengual$q_hat
 
 
-# Estimando os fatores estaticos ----
+scree_analysis(data)
 
 
 
 
-estimate_static_factors <- function(data, r) {
-  # Dimensões
-  T <- nrow(data)
+# Estimando os fatores ----
 
-  # Primeira diferença
-  y <- diff(data)
-
-  # Desvio padrão das diferenças
-  sy <- apply(y, 2, sd)
-
-  # Standardização das diferenças
-  yy <- scale(y)
-
-  # Detrending dos dados originais
-  regX <- cbind(1, 1:T)
-  beta <- solve(crossprod(regX)) %*% crossprod(regX, data)
-  X <- data - regX %*% beta
-
-  # Standardização BLL
-  Z <- sweep(X, 2, sy, "/")
-
-  # PCA nos dados transformados
-  pca_result <- prcomp(Z, scale = FALSE)
-
-  # Extrair fatores e loadings
-  factors <- pca_result$x[, 1:r]
-  loadings <- pca_result$rotation[, 1:r]
-
-  return(list(
-    factors = factors,
-    loadings = loadings,
-    sy = sy,
-    Z = Z
-  ))
-}
-
-
-
-# Função para construir a matriz companion
-construct_companion <- function(coef_mat, n_vars, n_lags) {
-  companion_size <- n_vars * n_lags
-  companion_matrix <- matrix(0, companion_size, companion_size)
-
-  # Preencher com coeficientes VAR (excluir constante)
-  companion_matrix[1:n_vars, ] <- t(coef_mat)
-
-  # Preencher com identidade para lags adicionais
-  if (n_lags > 1) {
-    companion_matrix[(n_vars + 1):companion_size, 1:(companion_size - n_vars)] <-
-      diag(1, companion_size - n_vars)
-  }
-
-  return(companion_matrix)
-}
-
-# Correção de Kilian reescrita
-kilian_correction <- function(A, u, n_vars, n_lags, n_obs) {
-  # Construir SIGMA (matriz de covariância dos resíduos)
-  SIGMA <- crossprod(u) / (n_obs - n_vars * n_lags - 1)
-
-  # Calcular autovalores da matriz companion original
-  peigen <- eigen(A)$values
-
-  # Inicializar soma dos autovalores
-  companion_size <- n_vars * n_lags
-  I <- diag(companion_size)
-  B <- t(A)
-  sumeig <- matrix(0, companion_size, companion_size)
-
-  # Calcular soma dos autovalores (seguindo MATLAB)
-  for (h in 1:companion_size) {
-    sumeig <- sumeig + peigen[h] * solve(I - peigen[h] * B)
-  }
-
-  # Calcular SIGMA_Y usando kronecker
-  vecSIGMAY <- solve(diag(companion_size^2) - kronecker(A, A)) %*%
-    as.vector(SIGMA)
-  SIGMAY <- matrix(vecSIGMAY, companion_size, companion_size)
-
-  # Calcular viés inicial
-  bias <- SIGMA %*% (solve(I - B) + B %*% solve(I - B %*% B) + sumeig) %*%
-    solve(SIGMAY)
-  bias <- -bias / n_obs
-
-  # Ajuste iterativo para garantir estacionariedade
-  delta <- 1
-  bcstab <- 9
-
-  while (bcstab >= 1 && delta > 0) {
-    bcA <- A - delta * bias
-
-    if (max(abs(eigen(bcA)$values)) >= 1) {
-      bcstab <- 1
-    } else {
-      bcstab <- 0
-    }
-
-    delta <- delta - 0.01
-
-    if (delta <= 0) {
-      bcstab <- 0
-    }
-  }
-
-  return(bcA)
-}
-
-# Função para estimar VAR com correção
-estimate_corrected_var <- function(data, p) {
-  # Dimensões
-  T <- nrow(data)
-  K <- ncol(data)
-
-  # Construir matriz de regressores
-  Y <- data[(p + 1):T, ]
-  X <- matrix(0, T - p, K * p)
-
-  for (i in 1:p) {
-    X[, ((i - 1) * K + 1):(i * K)] <- data[(p - i + 1):(T - i), ]
-  }
-
-  # Estimar coeficientes
-  beta <- solve(crossprod(X)) %*% crossprod(X, Y)
-
-  # Calcular resíduos
-  resid <- Y - X %*% beta
-
-  # Construir matriz companion
-  A <- construct_companion(beta, K, p)
-
-  # Aplicar correção de Kilian
-  A_corrected <- kilian_correction(A, resid, K, p, T)
-
-  # Extrair coeficientes corrigidos
-  beta_corrected <- t(A_corrected[1:K, ])
-
-  return(list(
-    coefficients = beta_corrected,
-    residuals = resid,
-    companion = A_corrected
-  ))
-}
-
-# Função para computar resíduos
-compute_residuals <- function(data, beta, p) {
-  T <- nrow(data)
-  K <- ncol(data)
-
-  # Construir matriz de regressores
-  Y <- data[(p + 1):T, ]
-  X <- matrix(0, T - p, K * p)
-
-  for (i in 1:p) {
-    X[, ((i - 1) * K + 1):(i * K)] <- data[(p - i + 1):(T - i), ]
-  }
-
-  # Calcular resíduos
-  residuals <- Y - X %*% beta
-
-  return(residuals)
-}
-
-
-estimate_dynamic_factors <- function(var_residuals, q, r) {
-  if (q == r) {
-    # Caso especial: q = r
-    K <- diag(r)
-    M <- diag(r)
-    eta <- var_residuals # Não precisamos transformar
-  } else {
-    # Calcular matriz de covariância dos resíduos
-    sigma_u <- cov(var_residuals)
-
-    # Extrair os q maiores autovalores/autovetores
-    eig <- eigen(sigma_u)
-    idx <- order(abs(eig$values), decreasing = TRUE)[1:q]
-
-    # Ordenar K e M pelos maiores autovalores
-    K <- eig$vectors[, idx]
-    M <- diag(sqrt(eig$values[idx]))
-
-    # Calcular fatores dinâmicos
-    eta <- var_residuals %*% K # Não multiplica por solve(M)
-  }
-
-  # Normalizar fatores
-  eta_std <- scale(eta, scale = TRUE)
-
-  return(list(
-    factors = eta_std, # Fatores normalizados
-    factors_raw = eta, # Fatores não normalizados
-    K = K,
-    M = M
-  ))
-}
-
-
-
-estimate_dfm <- function(data, r, q, p) {
-  # 1. Estimação dos fatores estáticos
-  static_result <- estimate_static_factors(data, r)
-
-  # 2. Estimação do VAR com correção de Kilian
-  var_result <- estimate_corrected_var(static_result$factors, p)
-
-  # 3. Estimação dos fatores dinâmicos
-  dynamic_result <- estimate_dynamic_factors(var_result$residuals, q, r)
-
-  # 4. Preparar componentes para IRF
-  companion <- var_result$companion
-
-  # Retornar todos os componentes necessários
-  return(list(
-    static_factors = static_result$factors,
-    static_loadings = static_result$loadings,
-    var_coefficients = var_result$coefficients,
-    var_residuals = var_result$residuals,
-    companion_matrix = companion,
-    dynamic_factors = dynamic_result$factors,
-    factors_raw = dynamic_result$factors_raw, # Corrigido aqui
-    dynamic_loadings = dynamic_result$K,
-    dynamic_scaling = dynamic_result$M,
-    data_sd = static_result$sy,
-    Z = static_result$Z
-  ))
-}
 
 # Usage example:
 r <- 7 # number of static factors
@@ -283,8 +60,8 @@ dfm_results <- estimate_dfm(data, r, q, p)
 # Computando a IRF ----
 
 
-
-
+# Calcular IRFs
+irf_results <- compute_irf_dfm(dfm_results, h = 50, nboot = 800)
 
 
 
@@ -349,166 +126,6 @@ panel_unit_root_tests <- function(data) {
 # 2. Testes de Raiz Unitária
 unit_root_tests <- panel_unit_root_tests(data)
 unit_root_tests$summary()
-
-
-
-
-## Analise de robustez dos fatores estaticos ----
-analyze_robustness <- function(data, r_values = c(5:9)) {
-  results <- list()
-
-  for (r in r_values) {
-    # Converter data para matriz numérica
-    data_matrix <- as.matrix(data)
-    if (!is.numeric(data_matrix)) {
-      stop("Os dados precisam ser numéricos")
-    }
-
-    # Ajustar modelo com diferente número de fatores
-    dfm_temp <- tryCatch(
-      {
-        estimate_dfm(data_matrix, r = r, q = min(r - 2, 5), p = 1)
-      },
-      error = function(e) {
-        message("Erro ao estimar modelo com r = ", r)
-        message(e)
-        return(NULL)
-      }
-    )
-
-    if (!is.null(dfm_temp)) {
-      # Calcular variância explicada
-      static_diagnostics <- dfm_diagnostics(dfm_temp, data_matrix)
-
-      results[[paste0("r_", r)]] <- list(
-        variance_explained = static_diagnostics$variance$total_explained,
-        cumulative_var = static_diagnostics$variance$cumulative,
-        model = dfm_temp
-      )
-    }
-  }
-
-  # Verificar se temos resultados
-  if (length(results) == 0) {
-    stop("Nenhum modelo pôde ser estimado")
-  }
-
-  # Criar plot comparativo
-  var_explained <- data.frame(
-    r = r_values,
-    var = sapply(results, function(x) x$variance_explained)
-  )
-
-  p <- ggplot(var_explained, aes(x = factor(r), y = var)) +
-    geom_bar(stat = "identity", fill = "steelblue") +
-    theme_minimal() +
-    labs(
-      x = "Número de Fatores",
-      y = "Variância Explicada (%)",
-      title = "Variância Explicada por Número de Fatores"
-    ) +
-    theme(plot.title = element_text(hjust = 0.5))
-
-  return(list(
-    results = results,
-    plot = p
-  ))
-}
-
-
-
-# Garantir que os dados são numéricos
-data_numeric <- apply(data, 2, as.numeric)
-robustness_analysis <- analyze_robustness(data_numeric)
-print(robustness_analysis$plot)
-
-# Imprimir sumário
-cat("\nAnálise de Robustez - Variância Explicada:\n")
-for (r in names(robustness_analysis$results)) {
-  cat(sprintf("\n%s: %.2f%%", r, robustness_analysis$results[[r]]$variance_explained))
-}
-
-
-
-## Analise de correlaçao das cargas fatoriais ----
-
-# 1. Agrupar variáveis por categoria econômica
-categorize_variables <- function(var_names) {
-  categories <- list(
-    consumo = grep("consumo_", var_names, value = TRUE),
-    vendas = grep("vendas_", var_names, value = TRUE),
-    veiculos = grep("veiculos_", var_names, value = TRUE),
-    producao = grep("producao_", var_names, value = TRUE),
-    trabalho = grep("trab_", var_names, value = TRUE),
-    precos = grep("price_", var_names, value = TRUE),
-    cambio = grep("cambio_", var_names, value = TRUE),
-    commodities = grep("commodity_", var_names, value = TRUE),
-    juros = grep("juros_|titulo_|spread_", var_names, value = TRUE),
-    credito = grep("credito_", var_names, value = TRUE),
-    ativos = grep("asset_", var_names, value = TRUE),
-    outros = grep("capacidade_", var_names, value = TRUE)
-  )
-
-  # Criar vetor ordenado com as categorias
-  ordered_vars <- unlist(categories)
-  categories_vec <- rep(names(categories), sapply(categories, length))
-  names(categories_vec) <- ordered_vars
-
-  return(list(
-    categories = categories,
-    ordered_vars = ordered_vars,
-    categories_vec = categories_vec
-  ))
-}
-
-# 2. Modificar a função de análise dos loadings para incluir categorias
-analyze_static_loadings_grouped <- function(dfm_results, data_names) {
-  # Categorizar variáveis
-  cat_info <- categorize_variables(data_names)
-
-  # Extrair e preparar loadings como antes
-  loadings <- as.matrix(dfm_results$static_loadings)
-  loadings_df <- data.frame(loadings)
-  colnames(loadings_df) <- paste0("Factor", 1:ncol(loadings))
-  rownames(loadings_df) <- data_names
-
-  # Preparar dados para o plot com categorias
-  loadings_long <- data.frame(
-    Variable = rep(rownames(loadings_df), ncol(loadings_df)),
-    Factor = rep(colnames(loadings_df), each = nrow(loadings_df)),
-    Value = as.vector(as.matrix(loadings_df)),
-    Category = rep(cat_info$categories_vec[rownames(loadings_df)], ncol(loadings_df))
-  )
-
-  # Criar plot com categorias
-  p <- ggplot(loadings_long, aes(
-    x = Factor, y = reorder(Variable, -as.numeric(factor(Category))),
-    fill = Value
-  )) +
-    geom_tile() +
-    scale_fill_gradient2(
-      low = "blue", mid = "white", high = "red", midpoint = 0,
-      limits = c(min(loadings), max(loadings))
-    ) +
-    facet_grid(Category ~ ., scales = "free_y", space = "free_y") +
-    theme_minimal() +
-    labs(x = "Fatores Estáticos", y = "", fill = "Loading") +
-    theme(
-      axis.text.y = element_text(size = 7),
-      panel.grid = element_blank(),
-      strip.text.y = element_text(angle = 0)
-    )
-
-  return(list(
-    loadings = loadings_df,
-    plot = p,
-    categories = cat_info$categories
-  ))
-}
-
-loadings_grouped <- analyze_static_loadings_grouped(dfm_results, colnames(data))
-print(loadings_grouped$plot)
-
 
 
 
@@ -598,3 +215,247 @@ dfm_diagnostics <- function(dfm_results, original_data) {
 
 static_diagnostics <- dfm_diagnostics(dfm_results, data)
 static_diagnostics$summary()
+
+
+
+
+
+
+
+
+
+## Analise de robustez dos fatores estaticos ----
+analyze_robustness <- function(data, r_values = c(5:9)) {
+  results <- list()
+
+  for (r in r_values) {
+    # Converter data para matriz numérica
+    data_matrix <- as.matrix(data)
+    if (!is.numeric(data_matrix)) {
+      stop("Os dados precisam ser numéricos")
+    }
+
+    # Ajustar modelo com diferente número de fatores
+    dfm_temp <- tryCatch(
+      {
+        estimate_dfm(data_matrix, r = r, q = min(r - 2, 5), p = 1)
+      },
+      error = function(e) {
+        message("Erro ao estimar modelo com r = ", r)
+        message(e)
+        return(NULL)
+      }
+    )
+
+    if (!is.null(dfm_temp)) {
+      # Calcular variância explicada
+      static_diagnostics <- dfm_diagnostics(dfm_temp, data_matrix)
+
+      results[[paste0("r_", r)]] <- list(
+        variance_explained = static_diagnostics$variance$total_explained,
+        cumulative_var = static_diagnostics$variance$cumulative,
+        model = dfm_temp
+      )
+    }
+  }
+
+  # Verificar se temos resultados
+  if (length(results) == 0) {
+    stop("Nenhum modelo pôde ser estimado")
+  }
+
+  # Criar plot comparativo
+  var_explained <- data.frame(
+    r = r_values,
+    var = sapply(results, function(x) x$variance_explained)
+  )
+
+  p <- ggplot2::ggplot(var_explained, ggplot2::aes(x = factor(r), y = var)) +
+    ggplot2::geom_bar(stat = "identity", fill = "steelblue") +
+    ggplot2::theme_classic() +
+    ggplot2::labs(
+      x = "Número de Fatores",
+      y = "Variância Explicada (%)",
+      title = "Variância Explicada por Número de Fatores"
+    ) +
+    ggplot2::theme(plot.title = ggplot2::element_text(hjust = 0.5))
+
+  return(list(
+    results = results,
+    plot = p
+  ))
+}
+
+
+
+# Garantir que os dados são numéricos
+data_numeric <- apply(data, 2, as.numeric)
+robustness_analysis <- analyze_robustness(data_numeric)
+print(robustness_analysis$plot)
+
+
+cat("\nAnálise de Robustez - Variância Explicada:\n")
+for (r in names(robustness_analysis$results)) {
+  cat(sprintf("\n%s: %.2f%%", r, robustness_analysis$results[[r]]$variance_explained))
+}
+
+
+
+## Analise de correlaçao das cargas fatoriais ----
+
+# 1. Agrupar variáveis por categoria econômica
+categorize_variables <- function(var_names) {
+  categories <- list(
+    consumo = grep("consumo_", var_names, value = TRUE),
+    vendas = grep("vendas_", var_names, value = TRUE),
+    veiculos = grep("veiculos_", var_names, value = TRUE),
+    producao = grep("producao_", var_names, value = TRUE),
+    trabalho = grep("trab_", var_names, value = TRUE),
+    precos = grep("price_", var_names, value = TRUE),
+    cambio = grep("cambio_", var_names, value = TRUE),
+    commodities = grep("commodity_", var_names, value = TRUE),
+    juros = grep("juros_|titulo_|spread_", var_names, value = TRUE),
+    credito = grep("credito_", var_names, value = TRUE),
+    ativos = grep("asset_", var_names, value = TRUE),
+    outros = grep("capacidade_", var_names, value = TRUE)
+  )
+
+  # Criar vetor ordenado com as categorias
+  ordered_vars <- unlist(categories)
+  categories_vec <- rep(names(categories), sapply(categories, length))
+  names(categories_vec) <- ordered_vars
+
+  return(list(
+    categories = categories,
+    ordered_vars = ordered_vars,
+    categories_vec = categories_vec
+  ))
+}
+
+# 2. Modificar a função de análise dos loadings para incluir categorias
+analyze_static_loadings_grouped <- function(dfm_results, data_names) {
+  # Categorizar variáveis
+  cat_info <- categorize_variables(data_names)
+
+  # Extrair e preparar loadings como antes
+  loadings <- as.matrix(dfm_results$static_loadings)
+  loadings_df <- data.frame(loadings)
+  colnames(loadings_df) <- paste0("Factor", 1:ncol(loadings))
+  rownames(loadings_df) <- data_names
+
+  # Preparar dados para o plot com categorias
+  loadings_long <- data.frame(
+    Variable = rep(rownames(loadings_df), ncol(loadings_df)),
+    Factor = rep(colnames(loadings_df), each = nrow(loadings_df)),
+    Value = as.vector(as.matrix(loadings_df)),
+    Category = rep(cat_info$categories_vec[rownames(loadings_df)], ncol(loadings_df))
+  )
+
+  # Criar plot com categorias
+  p <- ggplot2::ggplot(loadings_long, ggplot2::aes(
+    x = Factor, y = reorder(Variable, -as.numeric(factor(Category))),
+    fill = Value
+  )) +
+    ggplot2::geom_tile() +
+    ggplot2::scale_fill_gradient2(
+      low = "blue", mid = "white", high = "red", midpoint = 0,
+      limits = c(min(loadings), max(loadings))
+    ) +
+    ggplot2::facet_grid(Category ~ ., scales = "free_y", space = "free_y") +
+    ggplot2::theme_classic() +
+    ggplot2::labs(x = "Fatores Estáticos", y = "", fill = "Loading") +
+    ggplot2::theme(
+      axis.text.y = ggplot2::element_text(size = 7),
+      panel.grid = ggplot2::element_blank(),
+      strip.text.y = ggplot2::element_text(angle = 0)
+    )
+
+  return(list(
+    loadings = loadings_df,
+    plot = p,
+    categories = cat_info$categories
+  ))
+}
+
+loadings_grouped <- analyze_static_loadings_grouped(dfm_results, colnames(data))
+print(loadings_grouped$plot)
+
+
+
+
+
+
+
+
+
+
+# Bancada de teste ----
+
+
+
+
+
+
+
+p <- plot_irf(irf_results,
+  response_vars = response,
+  shock = 3, horizon = 20
+)
+p
+
+
+
+# Exemplo de uso
+yield <- list(
+  c("IDA" = 54),
+  c("Yield - 3M" = 49),
+  c("Yield - 1A" = 50),
+  c("Yield - 2A" = 51),
+  c("Yield - 3A" = 52),
+  c("Yield - 5A" = 53)
+)
+
+finalcial_markets <- list(
+  c("IBRx-100" = 64),
+  c("Mid Caps" = 63),
+  c("Small Caps" = 70),
+  c("IFnc" = 66),
+  c("IMob" = 68),
+  c("IFix" = 65)
+)
+
+ex <- list(
+  c("selic" = 47),
+  c("spread_j" = 55),
+  c("spreac_f" = 56),
+  c("commodity agro" = 44),
+  c("commodity energia" = 46),
+  c("ipca" = 33),
+  c("ipp" = 38),
+  c("USD" = 39)
+)
+
+response <- list(
+  c("USD/BRL" = 39),
+  c("Spread-J" = 55),
+  c("Spread-F" = 56),
+  c("IPCA" = 33),
+  c("IPP" = 38),
+  c("IBRx-100" = 64),
+  c("IMob" = 68),
+  c("IDA" = 54),
+  c("Yield - 1A" = 50),
+  c("Yield - 5A" = 53)
+)
+
+p <- plot_irf(irf_results,
+  response_vars = response,
+  shock = 3, horizon = 20
+)
+p
+
+# Depois salve usando ggsave
+ggplot2::ggsave("img/yield.png", p,
+  width = 10, height = 10, # em polegadas
+  dpi = 320
+)

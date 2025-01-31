@@ -26,8 +26,8 @@ cambio <- download_cambio(moedas) |> dplyr::rename(ref.date = date)
 ## Dados referente a juros ----
 vec_juros <- c(
   "selic" = 4189,
-  "cdi" = 4392,
-  "cdb_rdb" = 28618 # Taxa média acumulada no mês de instituições financeiras
+  "cdi" = 4392
+  # "cdb_rdb" = 28618 # Taxa média acumulada no mês de instituições financeiras
 )
 
 juros <- download_bcb_data(vec_juros, parallel = TRUE) |>
@@ -210,10 +210,6 @@ path_b3_csv <- list.files(
   full.names = TRUE
 )
 
-# Método 1: Usando map do purrr para criar uma lista de dataframes
-
-
-
 indices <- path_b3_csv |>
   purrr::map(~ readr::read_csv(
     .x,
@@ -233,7 +229,21 @@ indices <- path_b3_csv |>
     dplyr::mutate(ref.date = lubridate::dmy(ref.date))) |>
   purrr::imap(~ .x |>
     dplyr::rename(!!.y := ultimo)) |>
-  purrr::reduce(dplyr::left_join, by = "ref.date")
+  purrr::reduce(dplyr::left_join, by = "ref.date") |>
+  tidyr::pivot_longer(
+    cols = -ref.date,
+    names_to = "asset",
+    values_to = "price"
+  ) |>
+  dplyr::arrange(asset, ref.date) |>
+  dplyr::group_by(asset) |>
+  dplyr::mutate(
+    return = (price / dplyr::lag(price) - 1)
+  ) |>
+  dplyr::ungroup() |>
+  dplyr::select(-price) |>
+  tidyr::pivot_wider(names_from = asset, values_from = return) |>
+  tidyr::drop_na()
 
 
 
@@ -249,12 +259,35 @@ dados_tesouro <- GetTDData::td_get(titulos) |> suppressMessages()
 # Aplicar o modelo aos dados
 fixed_maturity <- generate_fixed_maturity_series(dados_tesouro)
 
+ida <- readr::read_csv("data/raw/mp_index/IDADI-HISTORICO - Historico.csv") |>
+  janitor::clean_names() |>
+  dplyr::select(ref.date = data_de_referencia, ida = variacao_diaria_percent) |>
+  dplyr::mutate(ref.date = lubridate::dmy(ref.date))
+
+ida_mensal <- ida |>
+  # Criar colunas de ano e mês para agrupamento
+  dplyr::mutate(
+    ref.date = lubridate::floor_date(ref.date, "month")
+  ) |>
+  # Agrupar por mês
+  dplyr::group_by(ref.date) |>
+  # Calcular retorno mensal
+  dplyr::summarise(
+    retorno_mensal = (prod(1 + ida / 100) - 1)
+  ) |>
+  # Ordenar por data
+  dplyr::arrange(ref.date)
+
+
+
+
 monthly_fixed_maturity_yield <- fixed_maturity |>
   dplyr::group_by(mes = lubridate::floor_date(data, "month")) |>
   dplyr::slice_tail(n = 1) |>
   dplyr::ungroup() |>
   dplyr::select(-data) |>
-  dplyr::rename(ref.date = mes)
+  dplyr::rename(ref.date = mes) |>
+  dplyr::left_join(ida_mensal, by = "ref.date")
 
 
 

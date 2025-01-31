@@ -155,10 +155,10 @@ bai_ng_criteria <- function(X, max_r = 15, standardize = TRUE) {
 #' print(results$q_hat)
 #'
 #' @export
-amengual_watson <- function(X, r, p = 4, max_q = NULL, standardize = TRUE) {
+amengual_watson <- function(X, r, p = 4, max_q = NULL, scale = TRUE) {
   X <- as.matrix(X)
 
-  if (standardize) {
+  if (scale) {
     X <- scale(X, center = TRUE, scale = TRUE)
   }
 
@@ -182,7 +182,7 @@ amengual_watson <- function(X, r, p = 4, max_q = NULL, standardize = TRUE) {
     resid_mat[, i] <- e
   }
 
-  bn <- bai_ng_criteria(resid_mat, max_r = max_q, standardize = TRUE)
+  bn <- bai_ng_criteria(resid_mat, max_r = max_q, standardize = FALSE)
   q_hat <- bn$r_hat$IC2
 
   list(
@@ -272,219 +272,204 @@ scree_analysis <- function(X, max_comp = 15) {
 
 
 
-constraint_matrix <- function(list_groups, n_factors) {
-  n_groups <- length(list_groups)
-  R <- diag(n_factors)
-  r <- c(rep(1, n_groups), rep(0, n_factors - n_groups))
+estimate_static_factors <- function(data, r) {
+  # Dimensões
+  T <- nrow(data)
 
-  lambda_constraints <- lapply(seq_along(list_groups), function(i) {
-    tibble::tibble(
-      series = list_groups[[i]],
-      factor_index = i,
-      R = list(R[i, ]),
-      r = r[i]
-    )
-  }) |>
-    dplyr::bind_rows()
+  # Primeira diferença apenas para calcular o desvio padrão
+  y <- diff(data)
+  sy <- apply(y, 2, sd)
 
-  return(lambda_constraints)
-}
+  # Standardização BLL: dados em nível divididos pelo sd das diferenças
+  Z <- sweep(data, 2, sy, "/")
 
-
-
-
-
-
-estimate_factor <- function(X, n_factors, constraint_info, tol = 1e-8, max_iter = 1000) {
-  # Standardize data
-  X <- scale(as.matrix(X))
-  T <- nrow(X)
-  N <- ncol(X)
-
-  # Initialize with PCA
-  svd_result <- svd(X)
-  F_hat <- sqrt(T) * svd_result$u[, 1:n_factors]
-  Lambda_hat <- matrix(0, N, n_factors)
-
-  # Apply initial constraints
-  for (i in seq_len(nrow(constraint_info))) {
-    series_name <- constraint_info$series[i]
-    factor_idx <- constraint_info$factor_index[i]
-    R_i <- unlist(constraint_info$R[i])
-    r_i <- constraint_info$r[i]
-
-    series_idx <- which(colnames(X) == series_name)
-    Lambda_hat[series_idx, ] <- R_i * r_i
-  }
-
-  # Get indices for constrained/unconstrained variables
-  constrained_indices <- which(colnames(X) %in% constraint_info$series)
-  unconstrained_indices <- setdiff(1:N, constrained_indices)
-
-  # Initialize objective function
-  V_old <- sum((X - F_hat %*% t(Lambda_hat))^2) / (N * T)
-
-  # Iterate until convergence
-  for (iter in 1:max_iter) {
-    # Update unconstrained loadings
-    Lambda_hat[unconstrained_indices, ] <- t(X[, unconstrained_indices]) %*% F_hat / T
-
-    # Update factors
-    F_hat <- X %*% Lambda_hat %*% solve(t(Lambda_hat) %*% Lambda_hat)
-
-    # Calculate new objective
-    V_new <- sum((X - F_hat %*% t(Lambda_hat))^2) / (N * T)
-
-    if (abs(V_new - V_old) < tol) break
-    V_old <- V_new
-  }
-
-  # Calculate fit statistics
-  res <- X - F_hat %*% t(Lambda_hat)
-  TSS <- sum(X^2)
-  RSS <- sum(res^2)
-  R2 <- 1 - RSS / TSS
-  R2_series <- 1 - colSums(res^2) / colSums(X^2)
+  # PCA nos dados transformados
+  pca_result <- prcomp(Z, scale = FALSE)
 
   return(list(
-    factors = F_hat,
-    loadings = Lambda_hat,
-    R2 = R2,
-    R2_series = R2_series,
-    iterations = iter,
-    objective = V_new,
-    residuals = res
+    factors = pca_result$x[, 1:r],
+    loadings = pca_result$rotation[, 1:r],
+    sy = sy,
+    Z = Z
   ))
 }
 
 
 
+construct_companion <- function(coef_mat, n_vars, n_lags) {
+  companion_size <- n_vars * n_lags
+  companion_matrix <- matrix(0, companion_size, companion_size)
 
-estimate_G <- function(F_t, q, p_var = 4) {
-  r <- ncol(F_t)
+  # Preencher com coeficientes VAR (excluir constante)
+  companion_matrix[1:n_vars, ] <- t(coef_mat)
 
-  # Input validation
-  if (q > r) stop("q must be less than or equal to r")
-  if (q < 1) stop("q must be positive")
-
-  var_model <- vars::VAR(F_t, p = p_var)
-  factor_innovations <- residuals(var_model)
-
-  Sigma_a <- cov(factor_innovations)
-  Sigma_a11 <- Sigma_a[1:q, 1:q]
-  Sigma_a21 <- Sigma_a[(q + 1):r, 1:q]
-
-  G <- matrix(0, r, q)
-  G[1:q, ] <- diag(q)
-  G[(q + 1):r, ] <- Sigma_a21 %*% solve(Sigma_a11)
-
-  # Validate G dimensions
-  if (!all(dim(G) == c(r, q))) {
-    stop("G matrix has incorrect dimensions")
+  # Preencher com identidade para lags adicionais
+  if (n_lags > 1) {
+    companion_matrix[(n_vars + 1):companion_size, 1:(companion_size - n_vars)] <-
+      diag(1, companion_size - n_vars)
   }
 
-  eta_t <- factor_innovations[, 1:q]
+  return(companion_matrix)
+}
+
+
+kilian_correction <- function(A, u, n_vars, n_lags, n_obs) {
+  # Construir SIGMA (matriz de covariância dos resíduos)
+  SIGMA <- crossprod(u) / (n_obs - n_vars * n_lags - 1)
+
+  # Calcular autovalores da matriz companion original
+  peigen <- eigen(A)$values
+
+  # Inicializar soma dos autovalores
+  companion_size <- n_vars * n_lags
+  I <- diag(companion_size)
+  B <- t(A)
+  sumeig <- matrix(0, companion_size, companion_size)
+
+  # Calcular soma dos autovalores (seguindo MATLAB)
+  for (h in 1:companion_size) {
+    sumeig <- sumeig + peigen[h] * solve(I - peigen[h] * B)
+  }
+
+  # Calcular SIGMA_Y usando kronecker
+  vecSIGMAY <- solve(diag(companion_size^2) - kronecker(A, A)) %*%
+    as.vector(SIGMA)
+  SIGMAY <- matrix(vecSIGMAY, companion_size, companion_size)
+
+  # Calcular viés inicial
+  bias <- SIGMA %*% (solve(I - B) + B %*% solve(I - B %*% B) + sumeig) %*%
+    solve(SIGMAY)
+  bias <- -bias / n_obs
+
+  # Ajuste iterativo para garantir estacionariedade
+  delta <- 1
+  bcstab <- 9
+
+  while (bcstab >= 1 && delta > 0) {
+    bcA <- A - delta * bias
+
+    if (max(abs(eigen(bcA)$values)) >= 1) {
+      bcstab <- 1
+    } else {
+      bcstab <- 0
+    }
+
+    delta <- delta - 0.01
+
+    if (delta <= 0) {
+      bcstab <- 0
+    }
+  }
+
+  return(Re(bcA))
+}
+
+
+
+estimate_corrected_var <- function(data, p) {
+  # Dimensões
+  T <- nrow(data)
+  K <- ncol(data)
+
+  # Construir matriz de regressores
+  Y <- data[(p + 1):T, ]
+  X <- matrix(0, T - p, K * p)
+
+  for (i in 1:p) {
+    X[, ((i - 1) * K + 1):(i * K)] <- data[(p - i + 1):(T - i), ]
+  }
+
+  # Estimar coeficientes
+  beta <- solve(crossprod(X)) %*% crossprod(X, Y)
+
+  # Calcular resíduos
+  resid <- Y - X %*% beta
+
+  # Construir matriz companion
+  A <- construct_companion(beta, K, p)
+
+  # Aplicar correção de Kilian
+  A_corrected <- kilian_correction(A, resid, K, p, T)
+
+  # Extrair coeficientes corrigidos
+  beta_corrected <- t(A_corrected[1:K, ])
 
   return(list(
-    G = G,
-    eta = eta_t,
-    var_model = var_model
+    coefficients = beta_corrected,
+    residuals = resid,
+    companion = A_corrected
   ))
 }
 
 
 
-#' Estimate Structural Dynamic Factor Model (SDFM)
-#'
-#' @description
-#' Estimates a structural dynamic factor model with constrained loadings
-#' and dynamic factor extraction.
-#'
-#' @param X Input data matrix
-#' @param r Number of static factors (default: 8)
-#' @param q Number of dynamic factors (default: equal to r)
-#' @param p_var Lag order for VAR model (default: 4)
-#' @param constraint_matrix Matrix of loading constraints
-#' @param group_vars List of variable groups
-#' @param horizon Forecast horizon for structural impulse response functions
-#'
-#' @return A list containing:
-#' - Lambda: Factor loadings
-#' - F: Factor scores
-#' - G: Transformation matrix (if r > q)
-#' - H: Orthogonalization matrix
-#' - eta: Innovations
-#' - Sigma_eta: Normalized covariance of innovations
-#' - Sigma_e: Error covariance
-#' - var_model: VAR model
-#' - sirf: Structural impulse response functions
-#' - convergence: Model convergence information
-#'
-#' @details
-#' Handles two scenarios:
-#' 1. Standard VAR approach when r = q
-#' 2. Reduced-rank dynamic factor model when r > q
-#'
-#' @export
-estimate_sdfm <- function(
-    X, r = 8, q = NULL, p_var = 4,
-    constraint_matrix,
-    group_vars,
-    horizon) {
-  if (is.null(q)) q <- r # Default case r=q
+compute_residuals <- function(data, beta, p) {
+  T <- nrow(data)
+  K <- ncol(data)
 
-  if (q > r) stop("Number of dynamic factors cannot exceed number of static factors")
+  # Construir matriz de regressores
+  Y <- data[(p + 1):T, ]
+  X <- matrix(0, T - p, K * p)
 
-  # Estimate named factors
-  named_factors <- estimate_factor(X,
-    n_factors = r,
-    constraint_info = constraint_matrix,
-    group_vars = group_vars
-  )
+  for (i in 1:p) {
+    X[, ((i - 1) * K + 1):(i * K)] <- data[(p - i + 1):(T - i), ]
+  }
+
+  # Calcular resíduos
+  residuals <- Y - X %*% beta
+
+  return(residuals)
+}
 
 
-  if (r == q) {
-    # Case r=q: Standard VAR approach
-    var_model <- vars::VAR(named_factors$factors, p = p_var)
-    resid_var <- residuals(var_model)
-    Sigma_eta <- cov(resid_var)
 
-    # Unit Effect Normalization via Cholesky
-    H_chol <- t(chol(Sigma_eta))
-    D <- diag(diag(H_chol))
-    H <- H_chol %*% solve(D)
-    Sigma_eta_normalized <- H %*% t(H)
-
-    G <- NULL
-    eta <- resid_var
+estimate_dynamic_factors <- function(var_residuals, q, r) {
+  if (q == r) {
+    K <- diag(r)
+    M <- diag(r)
+    eta <- var_residuals
   } else {
-    # Case r>q: Estimate G and get q-dimensional innovations
-    G_estimates <- estimate_G(named_factors$factors, q, p_var)
-    G <- G_estimates$G
-    eta <- G_estimates$eta
-    var_model <- G_estimates$var_model
-
-    # Compute Sigma_eta and H for q-dimensional innovations
-    Sigma_eta <- cov(eta)
-    H_chol <- t(chol(Sigma_eta))
-    D <- diag(diag(H_chol))
-    H <- H_chol %*% solve(D)
-    Sigma_eta_normalized <- H %*% t(H)
+    sigma_u <- cov(var_residuals)
+    eig <- eigen(sigma_u)
+    idx <- order(abs(eig$values), decreasing = TRUE)[1:q]
+    K <- eig$vectors[, idx]
+    M <- diag(sqrt(eig$values[idx]))
+    eta <- var_residuals %*% K %*% solve(M)
   }
 
-  # Compute SIRFs
-  sirf <- compute_SIRF(named_factors$loadings, var_model, G, H, horizon = horizon)
-
   return(list(
-    Lambda = named_factors$loadings,
-    F = named_factors$factors,
-    G = G,
-    H = H,
-    eta = eta,
-    Sigma_eta = Sigma_eta_normalized,
-    Sigma_e = named_factors$Sigma_e,
-    var_model = var_model,
-    sirf = sirf,
-    convergence = named_factors$convergence
+    factors = eta,
+    K = K,
+    M = M
+  ))
+}
+
+
+
+estimate_dfm <- function(data, r, q, p) {
+  # 1. Estimação dos fatores estáticos
+  static_result <- estimate_static_factors(data, r)
+
+  # 2. Estimação do VAR com correção de Kilian
+  var_result <- estimate_corrected_var(static_result$factors, p)
+
+  # 3. Estimação dos fatores dinâmicos
+  dynamic_result <- estimate_dynamic_factors(var_result$residuals, q, r)
+
+  # 4. Preparar componentes para IRF
+  companion <- var_result$companion
+
+  # Retornar todos os componentes necessários
+  return(list(
+    static_factors = static_result$factors,
+    static_loadings = static_result$loadings,
+    var_coefficients = var_result$coefficients,
+    var_residuals = var_result$residuals,
+    companion_matrix = companion,
+    dynamic_factors = dynamic_result$factors,
+    dynamic_loadings = dynamic_result$K,
+    dynamic_scaling = dynamic_result$M,
+    data_sd = static_result$sy,
+    Z = static_result$Z
   ))
 }
