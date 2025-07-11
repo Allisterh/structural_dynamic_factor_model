@@ -313,55 +313,63 @@ construct_companion <- function(coef_mat, n_vars, n_lags) {
 }
 
 
-kilian_correction <- function(A, u, n_vars, n_lags, n_obs) {
-  # Construir SIGMA (matriz de covariância dos resíduos)
-  SIGMA <- crossprod(u) / (n_obs - n_vars * n_lags - 1)
-
-  # Calcular autovalores da matriz companion original
-  peigen <- eigen(A)$values
-
-  # Inicializar soma dos autovalores
+kilian_correction <- function(A, u, n_vars, n_lags, n_obs, n_boot = 1000) {
   companion_size <- n_vars * n_lags
   I <- diag(companion_size)
-  B <- t(A)
-  sumeig <- matrix(0, companion_size, companion_size)
+  T <- n_obs
+  B_hat <- t(A)  
 
-  # Calcular soma dos autovalores (seguindo MATLAB)
-  for (h in 1:companion_size) {
-    sumeig <- sumeig + peigen[h] * solve(I - peigen[h] * B)
+  beta_dim <- dim(B_hat)
+  beta_star_mat <- array(0, dim = c(beta_dim[1], beta_dim[2], n_boot))
+
+  for (b in 1:n_boot) {
+    u_star <- u[sample(1:nrow(u), replace = TRUE), ]
+
+    y_star <- matrix(0, T + n_lags, n_vars)
+    for (t in (n_lags + 1):(T + n_lags)) {
+      y_lagged <- c()
+      for (lag in 1:n_lags) {
+        y_lagged <- c(y_lagged, y_star[t - lag, ])
+      }
+      y_star[t, ] <- (A %*% y_lagged) + u_star[t - n_lags, ]
+    }
+
+    Y <- y_star[(n_lags + 1):(T + n_lags), ]
+    X <- matrix(NA, T, n_vars * n_lags)
+    for (i in 1:T) {
+      X[i, ] <- as.vector(t(y_star[(i + n_lags - 1):(i), ][n_lags:1, ]))
+    }
+
+    B_star <- t(solve(t(X) %*% X) %*% t(X) %*% Y)
+    A_star <- matrix(0, n_vars * n_lags, n_vars * n_lags)
+    A_star[1:n_vars, ] <- B_star
+    if (n_lags > 1) {
+      A_star[(n_vars + 1):(n_vars * n_lags), 1:(n_vars * (n_lags - 1))] <- diag(n_vars * (n_lags - 1))
+    }
+
+    beta_star_mat[, , b] <- t(A_star)
   }
 
-  # Calcular SIGMA_Y usando kronecker
-  vecSIGMAY <- solve(diag(companion_size^2) - kronecker(A, A)) %*%
-    as.vector(SIGMA)
-  SIGMAY <- matrix(vecSIGMAY, companion_size, companion_size)
+  bias <- apply(beta_star_mat, c(1, 2), mean) - B_hat
+  bias <- -bias  
 
-  # Calcular viés inicial
-  bias <- SIGMA %*% (solve(I - B) + B %*% solve(I - B %*% B) + sumeig) %*%
-    solve(SIGMAY)
-  bias <- -bias / n_obs
-
-  # Ajuste iterativo para garantir estacionariedade
   delta <- 1
   bcstab <- 9
 
   while (bcstab >= 1 && delta > 0) {
-    bcA <- A - delta * bias
-
-    if (max(abs(eigen(bcA)$values)) >= 1) {
+    B_tilde <- B_hat + delta * bias  
+    if (max(Mod(eigen(t(B_tilde))$values)) >= 1) {
       bcstab <- 1
     } else {
       bcstab <- 0
     }
-
     delta <- delta - 0.01
-
     if (delta <= 0) {
       bcstab <- 0
     }
   }
 
-  return(Re(bcA))
+  return(Re(t(B_tilde)))
 }
 
 

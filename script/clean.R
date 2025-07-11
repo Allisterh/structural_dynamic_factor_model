@@ -84,7 +84,8 @@ print(unity_root_test)
 
 
 
-
 final_data <- remove_unit_root(data, max_diff = 5)
 
 # readr::write_csv(final_data$data, "data/processed/final_data.csv")
+
+final_data$control |> print(n = 100)
