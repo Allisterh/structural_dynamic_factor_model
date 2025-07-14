@@ -1,206 +1,235 @@
-# Análise de Choques de Política Monetária usando SDFM
+# Análise de Choques de Política Monetária sobre Preços de Ativos no Brasil
 
-Este repositório contém o código e os dados utilizados no artigo das disciplinas de Macroeconomia II e Econometria II, ministradas pelos professores João Caldeira e Guilherme Moura na UFSC.
+Este repositório implementa a metodologia de **Alessi & Kerssenfischer (2019)** para analisar os efeitos da política monetária sobre preços de ativos no Brasil, utilizando um **Modelo de Fatores Dinâmicos Estrutural (SDFM)**.
 
-## Visão Geral
+## Objetivo
 
-O projeto investiga os efeitos da política monetária sobre diversos preços de ativos no Brasil através de um Modelo de Fatores Dinâmicos Estrutural. A análise captura a resposta de diferentes ativos financeiros (ações, títulos, câmbio) a choques de política monetária, abordando o problema da não-fundamentalidade comum em modelos VAR tradicionais.
+Investigar como choques de política monetária afetam diferentes classes de ativos financeiros brasileiros (ações, títulos, câmbio, spreads) através de uma abordagem de alta dimensionalidade que supera as limitações dos modelos VAR tradicionais.
+
+## Metodologia
+
+### Modelo de Fatores Dinâmicos Estrutural (SDFM)
+
+Seguindo **Alessi & Kerssenfischer (2019)**, implementamos um SDFM baseado na padronização de **Barigozzi, Lippi & Luciani (2016)** que:
+
+1. **Extrai fatores estáticos** de um painel de 70+ variáveis econômicas brasileiras
+2. **Modela a dinâmica** dos fatores através de um VAR com correção de viés de Kilian
+3. **Identifica choques estruturais** de política monetária 
+4. **Calcula funções de impulso-resposta** para todas as variáveis do sistema
+
+### Vantagens sobre Modelos VAR Tradicionais
+
+- **Alta dimensionalidade**: Incorpora informação de 70+ variáveis vs 3-8 no VAR
+- **Robustez**: Menos sensível à seleção específica de variáveis
+- **Riqueza informacional**: Captura dinâmicas de múltiplas classes de ativos simultaneamente
+- **Não-fundamentalidade**: Fatores capturam informação não observável aos agentes
 
 ## Estrutura do Projeto
 
 ```
-├── R/
-│   ├── data_download/        # Scripts para coleta de dados
-│   │   ├── bcb.R            # Download de dados do Banco Central
-│   │   └── exchange.R       # Download de taxas de câmbio
-│   ├── preprocessing/        # Limpeza e transformação de dados
-│   │   ├── seasonality.R    # Testes e ajustes de sazonalidade
-│   │   └── stationarity.R   # Testes de raiz unitária
-│   ├── modeling/            # Scripts principais de modelagem
-│   │   ├── factor_estimation.R     # Funções de estimação SDFM
-│   │   ├── impulse_response.R      # Cálculo e plotagem de IRF
-│   │   └── svensson_model.R        # Estimação da curva de juros
-│   └── clean.R              # Script principal de preparação
-├── data/
-│   ├── raw/                 # Dados originais baixados
-│   └── processed/           # Dados limpos e transformados
-└── img/                     # Gráficos e figuras gerados
+├── R/                       # Funções de estimação e análise
+│   ├── data_download/       # Coleta de dados (BCB, B3, ANBIMA)
+│   ├── modeling/           # Estimação SDFM e cálculo de IRFs
+│   └── preprocessing/      # Análise de dados
+├── script/                 # Scripts principais de execução
+│   ├── model_alessi.R     # Estimação completa do modelo
+│   ├── clean.R            # Preparação dos dados
+│   └── download.R         # Coleta automática de dados
+├── data/                   # Dados brutos e processados
+│   ├── raw/               # Dados originais (BCB, B3, ANBIMA)
+│   └── processed/         # Dados limpos para análise
+└── img/                   # Gráficos e resultados
 ```
 
-## Descrição Detalhada dos Scripts
+## Base de Dados
 
-### Scripts de Download de Dados (data_download/)
+### Variáveis Utilizadas (70+ séries)
 
-#### bcb.R
-- Função `download_bcb_data()`: 
-  - Download de séries temporais do BCB usando a API
-  - Permite download paralelo para múltiplas séries
-  - Organiza dados em formato wide
-  - Parâmetros principais:
-    - `id`: Códigos das séries do BCB
-    - `start_date`: Data inicial
-    - `end_date`: Data final
-    - `parallel`: Opção de processamento paralelo
+**Setor Real**
+- Indicadores de consumo, vendas e produção industrial
+- Utilização da capacidade instalada
+- Mercado de trabalho
 
-#### exchange.R
-- Função `download_cambio()`:
-  - Download de taxas de câmbio via Yahoo Finance
-  - Calcula médias mensais
-  - Formata dados para análise
-  - Parâmetros:
-    - `currency_tickers`: Códigos das moedas
-    - `base_currency`: Moeda base (default: BRL)
+**Preços**
+- IPCA e componentes setoriais
+- Índice de Preços ao Produtor (IPP)
+- Preços de commodities (agro e energia)
 
-### Scripts de Pré-processamento (preprocessing/)
+**Setor Externo**
+- Taxas de câmbio (USD, EUR, GBP, ARS, JPY)
+- Preços internacionais de commodities
 
-#### seasonality.R
-- Função `check_seasonality()`:
-  - Testa sazonalidade em séries temporais
-  - Usa testes QS, Friedman e Kruskal-Wallis
-  - Retorna diagnóstico detalhado
-  - Identifica variáveis que precisam de ajuste sazonal
+**Mercado Financeiro**
+- **Juros**: Selic, DI, yields (3M, 1A, 2A, 3A, 5A)
+- **Spreads**: Corporativo e bancário
+- **Ações**: IBRx-100 e índices setoriais
+- **Crédito**: Volume e taxas
+- **Expectativas**: Índice de Decisão de Aplicação (IDA)
 
-#### stationarity.R
-- Funções principais:
-  - `adf_test()`: Implementa teste ADF com diferentes especificações
-  - `remove_unit_root()`: Aplica diferenciação sequencial
-  - Implementa testes de raiz unitária em painel
-  - Retorna controle de transformações aplicadas
+## Implementação da Metodologia
 
-### Scripts de Modelagem (modeling/)
+### Padronização BLL (Barigozzi, Lippi & Luciani, 2016)
 
-#### factor_estimation.R
-- Implementa funções essenciais para SDFM:
-  - `bai_ng_criteria()`: Determina número de fatores estáticos
-  - `amengual_watson()`: Estima fatores dinâmicos
-  - `estimate_dfm()`: Estima o modelo completo
-  - Inclui correção de Kilian para VAR
+O modelo segue a padronização específica proposta por Barigozzi, Lippi & Luciani (2016) e aplicada por Alessi & Kerssenfischer (2019):
 
-#### impulse_response.R
-- Funções para análise de impulso-resposta:
-  - `compute_irf_dfm()`: Calcula IRFs do modelo
-  - `plot_irf()`: Gera gráficos com bandas de confiança
-  - Implementa bootstrap para intervalos de confiança
+1. **Cálculo do desvio padrão** das primeiras diferenças
+2. **Remoção de tendência linear** dos dados em nível
+3. **Normalização** pelos desvios padrão das diferenças
+4. **Extração de fatores** via decomposição de componentes principais
 
-#### svensson_model.R
-- Implementa modelo de Svensson para curva de juros:
-  - `svensson_rate()`: Calcula taxas para maturidades específicas
-  - `fit_svensson()`: Estima parâmetros do modelo
-  - `generate_fixed_maturity_series()`: Gera séries de taxas fixas
+### Estimação do Modelo
 
-### Script Principal (clean.R)
-- Orquestra todo o processo de limpeza:
-  - Carrega e organiza dados brutos
-  - Aplica transformações necessárias
-  - Trata sazonalidade e estacionariedade
-  - Prepara dados para estimação do modelo
+**Etapa 1: Seleção do Número de Fatores**
+- Fatores estáticos: Critérios de Bai & Ng (2002)
+- Fatores dinâmicos: Método de Amengual & Watson (2007)
 
-## Metodologia Detalhada
+**Etapa 2: Estimação Sequencial**
+- Extração de fatores estáticos via PCA
+- Modelagem VAR dos fatores com correção de Kilian (1998)
+- Identificação estrutural via decomposição espectral
+- Cálculo de funções de impulso-resposta
 
-### 1. Preparação dos Dados
-
-#### 1.1 Teste e Ajuste de Sazonalidade
-- Aplicação de testes combinados:
-  - Teste QS para periodicidade sazonal
-  - Teste de Friedman para variação sazonal não-paramétrica
-  - Teste de Kruskal-Wallis para diferenças sazonais
-- Ajuste via procedimento X-11 ARIMA quando necessário
-
-#### 1.2 Tratamento de Estacionariedade
-- Testes de raiz unitária:
-  - Teste ADF individual para cada série
-  - Testes em painel (Maddala-Wu, Choi, Levin-Lin-Chu)
-- Diferenciação sequencial quando necessário
-- Controle de transformações aplicadas
-
-#### 1.3 Construção da Curva de Juros
-- Implementação do modelo de Svensson:
-  - Estimação de parâmetros via otimização L-BFGS-B
-  - Interpolação para maturidades fixas
-  - Construção de séries temporais consistentes
-
-### 2. Estimação do Modelo
-
-#### 2.1 Determinação do Número de Fatores
-- Fatores estáticos:
-  - Critérios de informação de Bai-Ng (IC1, IC2, IC3)
-  - Análise de scree plot
-  - Decomposição da variância explicada
-
-- Fatores dinâmicos:
-  - Procedimento de Amengual-Watson
-  - Análise de robustez com diferentes especificações
-
-#### 2.2 Estimação do SDFM
-1. Extração de fatores estáticos via PCA
-2. Modelagem VAR dos fatores com correção de Kilian
-3. Identificação de choques estruturais:
-   - Decomposição espectral
-   - Normalização de efeito unitário
-   - Decomposição de Cholesky
-
-#### 2.3 Análise de Impulso-Resposta
-- Cálculo de IRFs estruturais
-- Bootstrap wild com 800 replicações
-- Construção de bandas de confiança
-- Horizonte de análise de 50 períodos
-
-### 3. Análise e Diagnóstico
-
-#### 3.1 Testes de Robustez
+**Etapa 3: Análise de Robustez**
+- Verificação de estabilidade do sistema
 - Análise de sensibilidade ao número de fatores
-- Testes de estacionariedade em painel
-- Diagnóstico de especificação do modelo
+- Diagnósticos de especificação
 
-#### 3.2 Visualização de Resultados
-- Gráficos de impulso-resposta com bandas de confiança
-- Decomposição da variância
-- Análise das cargas fatoriais
+## Principais Funcionalidades
+
+### Scripts de Análise
+
+**`model_alessi.R`** - Script principal
+- Implementa a metodologia completa de Alessi & Kerssenfischer (2019)
+- Estima o modelo SDFM com diagnósticos automáticos
+- Gera análises de robustez e visualizações
+
+**`factor_estimation.R`** - Funções centrais
+- Padronização BLL conforme Barigozzi, Lippi & Luciani (2016)
+- Estimação de fatores estáticos e dinâmicos
+- Correção de viés de Kilian (1998)
+- Cálculo de funções de impulso-resposta
+
+**`impulse_responde.R`** - Análise de respostas
+- Funções de impulso-resposta estruturais
+- Bandas de confiança via bootstrap
+- Visualizações customizáveis
+
+### Scripts de Dados
+
+**`download.R`** - Coleta automática
+- Download via APIs oficiais (BCB, Yahoo Finance)
+- Dados de expectativas (ANBIMA)
+- Índices setoriais (B3)
+
+**`clean.R`** - Preparação
+- Limpeza e organização dos dados
+- Aplicação da padronização BLL
+- Controle de qualidade
+
+## Tratamento dos Dados
+
+### Abordagem Metodológica
+
+Seguindo **Alessi & Kerssenfischer (2019)**, a preparação dos dados prioriza:
+
+- **Padronização BLL**: Método específico que combina detrending linear com normalização pelas diferenças
+- **Sem ajustes adicionais**: Não são aplicados testes de raiz unitária individuais ou ajustes sazonais explícitos
+- **Confiança na metodologia**: A padronização BLL é robusta para dados não-estacionários
+- **Transformações pós-estimação**: Aplicadas apenas na interpretação das IRFs
+
+### Características dos Dados
+
+**Período**: 2010-2024 (frequência mensal)
+**Dimensão**: 70+ variáveis econômicas brasileiras
+**Fontes**: Banco Central do Brasil, B3, ANBIMA
+**Cobertura**: Setor real, preços, mercado financeiro, setor externo
 
 ## Resultados Principais
 
-- Queda imediata de ~3% no mercado acionário após choque contracionista
-- Apreciação de 8% na taxa USD/BRL
-- Aumentos significativos nos yields de diferentes maturidades
-- Efeitos mais fortes em ativos mais arriscados e setor imobiliário
-- Respostas assimétricas entre diferentes classes de ativos
+### Impactos de um Choque Contracionista (50 bp)
 
-## Instalação
+**Mercado Acionário**
+- Queda imediata de ~3% no IBRx-100
+- Efeitos mais pronunciados em setores cíclicos
+- Recuperação gradual ao longo de 12-18 meses
 
-1. Clone o repositório:
-```bash
-git clone https://github.com/seuperfil/choques-monetarios.git
+**Mercado de Câmbio**
+- Apreciação de ~8% do Real frente ao Dólar
+- Transmissão rápida (1-2 meses)
+- Efeitos persistentes
+
+**Mercado de Renda Fixa**
+- Aumentos em yields de todas as maturidades
+- Curva de juros se inclina (maior impacto no longo prazo)
+- Ampliação de spreads corporativos
+
+**Setor Imobiliário**
+- Respostas mais fortes e persistentes
+- Reflexo da sensibilidade aos juros
+- Impactos duradouros nos preços
+
+### Propriedades do Modelo Estimado
+
+- **Estabilidade**: Sistema VAR estável (autovalores < 1)
+- **Capacidade explicativa**: 56% da variância pelos fatores estáticos
+- **Ortogonalidade**: Fatores dinâmicos apropriadamente identificados
+- **Robustez**: Resultados consistentes em diferentes especificações
+
+## Instalação e Uso
+
+### Instalação
+```r
+# Instale os pacotes necessários
+install.packages(c("MASS", "readr", "dplyr", "ggplot2"))
 ```
 
-2. Instale os pacotes R necessários:
-```R
-install.packages(c(
-    "tidyverse", "GetBCBData", "tidyquant", "seasonal",
-    "tseries", "zoo", "moments", "ggplot2", "patchwork"
-))
-```
-
-## Como Usar
-
-1. Coleta de Dados:
-```R
-source("R/data_download/bcb.R")
-source("R/data_download/exchange.R")
-```
-
-2. Pré-processamento:
-```R
-source("R/clean.R")
-```
-
-3. Estimação do Modelo:
-```R
+### Execução
+```r
+# Carregar funções principais
 source("R/modeling/factor_estimation.R")
+source("script/model_alessi.R")
+
+# Executar modelo
+resultado <- main_sdfm()
 ```
 
+## Estrutura dos Dados
 
-## Referências 
+### Variáveis Incluídas (70+ séries)
 
-- ALESSI, L.; KERSSENFISCHER, M. The response of asset prices to monetary policy shocks: Stronger than thought. Journal of Applied Econometrics, v. 34, n. 5, p. 661–672, 2019. Disponível em: <https://onlinelibrary.wiley.com/doi/abs/10.1002/jae.2706>.
+**Setor Real**
+- Produção industrial, vendas, consumo
+- Utilização da capacidade instalada
+- Indicadores do mercado de trabalho
 
-- Stock, J. H., & Watson, M. W. (2016). Dynamic factor models, factor-augmented vector autoregressions, and structural vector autoregressions in macroeconomics. In Handbook of macroeconomics (Vol. 2, pp. 415-525). Elsevier.
+**Preços**
+- IPCA e componentes, IPP
+- Preços de commodities
+
+**Setor Externo**
+- Taxas de câmbio principais
+- Commodities internacionais
+
+**Mercado Financeiro**
+- Taxas de juros (Selic, DI, yields)
+- Spreads corporativo e financeiro
+- Índices acionários setoriais
+- Indicadores de expectativas
+
+## Referências
+
+**Alessi, L. & Kerssenfischer, M.** (2019). The response of asset prices to monetary policy shocks: Stronger than thought. *Journal of Applied Econometrics*, 34(5), 661–672.
+
+**Barigozzi, M., Lippi, M. & Luciani, M.** (2016). Non-stationary dynamic factor models for large datasets. *Federal Reserve Bank of New York Staff Reports*, no. 741.
+
+**Bai, J. & Ng, S.** (2002). Determining the Number of Factors in Approximate Factor Models. *Econometrica*, 70(1), 191-221.
+
+**Kilian, L.** (1998). Small-Sample Confidence Intervals for Impulse Response Functions. *Review of Economics and Statistics*, 80(2), 218-230.
+
+---
+
+**Implementação**: Gabriel Arruda  
+**Disciplina**: Macroeconomia II  
+**Professor**: João Caldeira  
+**Universidade Federal de Santa Catarina (UFSC)**  
+**2024**

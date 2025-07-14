@@ -58,7 +58,7 @@ data_no_season <- data |>
   purrr::map_dfc(~ as.numeric(.x))
 
 
-# Create new dataframe using tidyverse approach
+# Apply seasonal adjustment to identified variables
 data <- data |>
   dplyr::mutate(
     dplyr::across(
@@ -67,25 +67,9 @@ data <- data |>
     )
   )
 
-# Verify the seasonality was removed
-check_if_final_was_removed <- check_seasonality(data)
-print(check_if_final_was_removed)
-# Yes, it was
-
-
-
-
-
-
-# We now gotta check for unity roots ----
-
+# Check for unit roots and apply transformations
 unity_root_test <- adf_test(data)
-print(unity_root_test)
-
-
-
 final_data <- remove_unit_root(data, max_diff = 5)
 
-# readr::write_csv(final_data$data, "data/processed/final_data.csv")
-
-final_data$control |> print(n = 100)
+# Save processed data
+readr::write_csv(final_data$data, "data/processed/final_data.csv")

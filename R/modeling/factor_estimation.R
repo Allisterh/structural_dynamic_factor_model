@@ -259,13 +259,6 @@ scree_analysis <- function(X, max_comp = 15) {
     plot = p
   )
 
-  # Print cumulative R2
-  cat("Cumulative proportion of variance explained:\n")
-  print(round(results$cumulative_r2, 4))
-
-  # Display plot
-  print(p)
-
   return(invisible(results))
 }
 
@@ -275,22 +268,55 @@ scree_analysis <- function(X, max_comp = 15) {
 estimate_static_factors <- function(data, r) {
   # Dimensões
   T <- nrow(data)
-
-  # Primeira diferença apenas para calcular o desvio padrão
-  y <- diff(data)
-  sy <- apply(y, 2, sd)
-
-  # Standardização BLL: dados em nível divididos pelo sd das diferenças
-  Z <- sweep(data, 2, sy, "/")
-
-  # PCA nos dados transformados
-  pca_result <- prcomp(Z, scale = FALSE)
-
+  N <- ncol(data)
+  
+  # ===================================================================
+  # PADRONIZAÇÃO BLL (Barigozzi, Lippi, Luciani 2016)
+  # Implementação baseada no código MATLAB original DFMest_BLL.m
+  # ===================================================================
+  
+  # 1. Calcular primeira diferença para obter desvio padrão
+  y <- diff(data)  # Primeira diferença: Y(t) - Y(t-1)
+  sy <- apply(y, 2, sd)  # Desvio padrão das primeiras diferenças
+  
+  # 2. Padronizar as primeiras diferenças (para cálculo dos autovalores)
+  y_centered <- sweep(y, 2, colMeans(y), "-")  # Centrar
+  yy <- sweep(y_centered, 2, sy, "/")  # Padronizar: (y - mean(y))/sd(y)
+  
+  # 3. Detrending dos dados em nível
+  # Construir matriz de regressores: [1, t] para remoção de tendência linear
+  regX <- cbind(1, 1:T)  # Constante e tendência linear
+  
+  # Remover tendência de cada série individualmente
+  beta <- solve(crossprod(regX)) %*% crossprod(regX, data)  # Coeficientes da regressão
+  X <- data - regX %*% beta  # Dados destrendizados
+  
+  # 4. Padronização BLL final: dados destrendizados / sd das diferenças
+  Z <- sweep(X, 2, sy, "/")  # Padronização BLL: X / sy
+  
+  # ===================================================================
+  # EXTRAÇÃO DOS FATORES ESTÁTICOS
+  # ===================================================================
+  
+  # 5. Calcular autovalores e autovetores da matriz de covariância das diferenças padronizadas
+  cov_yy <- cov(yy)
+  eigen_result <- eigen(cov_yy, symmetric = TRUE)
+  
+  # 6. Selecionar os r maiores autovalores (em ordem decrescente)
+  idx <- order(eigen_result$values, decreasing = TRUE)[1:r]
+  lambda <- eigen_result$vectors[, idx]  # Autovetores (loadings)
+  
+  # 7. Calcular fatores estáticos: F = Z * lambda
+  F <- Z %*% lambda
+  
   return(list(
-    factors = pca_result$x[, 1:r],
-    loadings = pca_result$rotation[, 1:r],
-    sy = sy,
-    Z = Z
+    factors = F,                    # Fatores estáticos F = Z * lambda
+    loadings = lambda,              # Loadings (autovetores)
+    sy = sy,                        # Desvios padrão das diferenças
+    Z = Z,                          # Dados padronizados BLL
+    eigenvalues = eigen_result$values[idx],  # Autovalores selecionados
+    yy = yy,                        # Diferenças padronizadas (para diagnóstico)
+    detrended_data = X              # Dados destrendizados (para diagnóstico)
   ))
 }
 
@@ -313,99 +339,182 @@ construct_companion <- function(coef_mat, n_vars, n_lags) {
 }
 
 
-kilian_correction <- function(A, u, n_vars, n_lags, n_obs, n_boot = 1000) {
-  companion_size <- n_vars * n_lags
-  I <- diag(companion_size)
-  T <- n_obs
-  B_hat <- t(A)  
-
-  beta_dim <- dim(B_hat)
-  beta_star_mat <- array(0, dim = c(beta_dim[1], beta_dim[2], n_boot))
-
-  for (b in 1:n_boot) {
-    u_star <- u[sample(1:nrow(u), replace = TRUE), ]
-
-    y_star <- matrix(0, T + n_lags, n_vars)
-    for (t in (n_lags + 1):(T + n_lags)) {
-      y_lagged <- c()
-      for (lag in 1:n_lags) {
-        y_lagged <- c(y_lagged, y_star[t - lag, ])
-      }
-      y_star[t, ] <- (A %*% y_lagged) + u_star[t - n_lags, ]
-    }
-
-    Y <- y_star[(n_lags + 1):(T + n_lags), ]
-    X <- matrix(NA, T, n_vars * n_lags)
-    for (i in 1:T) {
-      X[i, ] <- as.vector(t(y_star[(i + n_lags - 1):(i), ][n_lags:1, ]))
-    }
-
-    B_star <- t(solve(t(X) %*% X) %*% t(X) %*% Y)
-    A_star <- matrix(0, n_vars * n_lags, n_vars * n_lags)
-    A_star[1:n_vars, ] <- B_star
-    if (n_lags > 1) {
-      A_star[(n_vars + 1):(n_vars * n_lags), 1:(n_vars * (n_lags - 1))] <- diag(n_vars * (n_lags - 1))
-    }
-
-    beta_star_mat[, , b] <- t(A_star)
+kilian_correction <- function(A, SIGMA, t, q, p) {
+  # ===================================================================
+  # CORREÇÃO DE VIÉS DE KILIAN (1998)
+  # Implementação baseada no código MATLAB original kiliancorr.m
+  # Fonte: Pope (1990), JTSA; Kilian (1998)
+  # ===================================================================
+  
+  T <- t - p  # Tamanho efetivo da amostra
+  I <- diag(q * p)  # Matriz identidade
+  B <- t(A)  # Transposta da matriz companion
+  
+  # Calculate SIGMAY using Lyapunov equation
+  A_kron_A <- kronecker(A, A)
+  I_full <- diag((q * p)^2)
+  
+  lyapunov_matrix <- I_full - A_kron_A
+  if (det(lyapunov_matrix) == 0) {
+    lyapunov_inv <- MASS::ginv(lyapunov_matrix)
+  } else {
+    lyapunov_inv <- solve(lyapunov_matrix)
   }
-
-  bias <- apply(beta_star_mat, c(1, 2), mean) - B_hat
-  bias <- -bias  
-
-  delta <- 1
-  bcstab <- 9
-
-  while (bcstab >= 1 && delta > 0) {
-    B_tilde <- B_hat + delta * bias  
-    if (max(Mod(eigen(t(B_tilde))$values)) >= 1) {
+  
+  vecSIGMAY <- lyapunov_inv %*% c(SIGMA)
+  SIGMAY <- matrix(vecSIGMAY, nrow = q * p, ncol = q * p)
+  
+  # Calculate eigenvalues of companion matrix
+  peigen <- eigen(A)$values
+  
+  # Calculate bias correction terms
+  sumeig <- matrix(0, q * p, q * p)
+  for (h in 1:(q * p)) {
+    if (abs(1 - peigen[h]) > 1e-10) {
+      term <- peigen[h] * solve(I - peigen[h] * B)
+      sumeig <- sumeig + term
+    }
+  }
+  
+  # Calculate analytical bias
+  I_minus_B <- I - B
+  I_minus_B2 <- I - B %*% B
+  
+  if (det(I_minus_B) == 0) {
+    inv_I_minus_B <- MASS::ginv(I_minus_B)
+  } else {
+    inv_I_minus_B <- solve(I_minus_B)
+  }
+  
+  if (det(I_minus_B2) == 0) {
+    warning("Matriz (I-B^2) é singular. Usando pseudo-inversa.")
+    inv_I_minus_B2 <- MASS::ginv(I_minus_B2)
+  } else {
+    inv_I_minus_B2 <- solve(I_minus_B2)
+  }
+  
+  if (det(SIGMAY) == 0) {
+    warning("Matriz SIGMAY é singular. Usando pseudo-inversa.")
+    inv_SIGMAY <- MASS::ginv(SIGMAY)
+  } else {
+    inv_SIGMAY <- solve(SIGMAY)
+  }
+  
+  # Calcular termo do viés
+  bias_term <- inv_I_minus_B + B %*% inv_I_minus_B2 + sumeig
+  bias <- SIGMA %*% bias_term %*% inv_SIGMAY
+  
+  # 5. Ajuste do viés (dividido por T conforme Kilian)
+  Abias <- -bias / T
+  
+  # 6. Aplicar correção com fator de ajuste delta
+  bcstab <- 9  # Valor arbitrário > 1
+  delta <- 1   # Fator de ajuste
+  
+  cat("Aplicando correção iterativa...\n")
+  iter <- 0
+  max_iter <- 100
+  
+  while (bcstab >= 1 && iter < max_iter) {
+    iter <- iter + 1
+    
+    # Ajustar correção proporcionalmente
+    bcA <- A - delta * Abias
+    
+    # Verificar estabilidade (todos os autovalores < 1 em módulo)
+    bcmod <- abs(eigen(bcA)$values)
+    
+    if (any(bcmod >= 1)) {
       bcstab <- 1
     } else {
       bcstab <- 0
+      break
     }
+    
     delta <- delta - 0.01
+    
     if (delta <= 0) {
       bcstab <- 0
+      bcA <- A
+      break
     }
   }
 
-  return(Re(t(B_tilde)))
+  return(bcA)
 }
 
 
 
 estimate_corrected_var <- function(data, p) {
-  # Dimensões
   T <- nrow(data)
   K <- ncol(data)
-
-  # Construir matriz de regressores
-  Y <- data[(p + 1):T, ]
-  X <- matrix(0, T - p, K * p)
-
+  
+  # Construct regressor matrix
+  RHS <- matrix(NA, T - p, K * p + 1)
+  
   for (i in 1:p) {
-    X[, ((i - 1) * K + 1):(i * K)] <- data[(p - i + 1):(T - i), ]
+    start_col <- (i - 1) * K + 1
+    end_col <- i * K
+    RHS[, start_col:end_col] <- data[(p + 1 - i):(T - i), ]
   }
-
-  # Estimar coeficientes
-  beta <- solve(crossprod(X)) %*% crossprod(X, Y)
-
-  # Calcular resíduos
-  resid <- Y - X %*% beta
-
-  # Construir matriz companion
-  A <- construct_companion(beta, K, p)
-
-  # Aplicar correção de Kilian
-  A_corrected <- kilian_correction(A, resid, K, p, T)
-
-  # Extrair coeficientes corrigidos
-  beta_corrected <- t(A_corrected[1:K, ])
+  
+  # Add constant
+  RHS[, K * p + 1] <- 1
+  RHS[, K * p + 1] <- 1
+  
+  # 2. Variável dependente
+  LHS <- data[(p + 1):T, ]
+  
+  # 3. Estimação por OLS
+  bet <- solve(crossprod(RHS)) %*% crossprod(RHS, LHS)
+  
+  # 4. Calcular resíduos
+  u <- LHS - RHS %*% bet
+  
+  # 5. Construir matriz companion (excluindo constante)
+  coeffcompanion <- rbind(
+    t(bet[1:(p * K), ]),  # Coeficientes VAR
+    cbind(diag((p - 1) * K), matrix(0, (p - 1) * K, K))  # Identidade para lags
+  )
+  
+  # Calculate covariance matrix of residuals
+  SIGMA <- cov(u)
+  
+  # Apply Kilian correction
+  eigenvals_orig <- eigen(coeffcompanion)$values
+  max_eigen_orig <- max(abs(eigenvals_orig))
+  
+  coeffcompanion_corrected <- kilian_correction(coeffcompanion, SIGMA, T, K, p)
+  
+  eigenvals_corr <- eigen(coeffcompanion_corrected)$values
+  max_eigen_corr <- max(abs(eigenvals_corr))
+  
+  # Extract corrected coefficients
+  beta_corrected <- t(coeffcompanion_corrected[1:K, ])
+  
+  # Recalculate residuals with corrected coefficients
+  Y_resid <- data[(p + 1):T, ]
+  X_resid <- matrix(0, T - p, K * p)
+  
+  for (i in 1:p) {
+    X_resid[, ((i - 1) * K + 1):(i * K)] <- data[(p - i + 1):(T - i), ]
+  }
+  
+  beta_corrected <- as.matrix(Re(beta_corrected))
+  X_resid <- as.matrix(Re(X_resid))
+  Y_resid <- as.matrix(Re(Y_resid))
+  
+  u_corrected <- Y_resid - X_resid %*% beta_corrected
+  u_corrected <- as.matrix(Re(u_corrected))
 
   return(list(
     coefficients = beta_corrected,
-    residuals = resid,
-    companion = A_corrected
+    residuals = u_corrected,
+    companion = coeffcompanion_corrected,
+    residuals_original = u,
+    coefficients_original = t(bet[1:(p * K), ]),
+    companion_original = coeffcompanion,
+    covariance_matrix = SIGMA
   ))
 }
 
@@ -432,52 +541,139 @@ compute_residuals <- function(data, beta, p) {
 
 
 estimate_dynamic_factors <- function(var_residuals, q, r) {
+  # ===================================================================
+  # ESTIMAÇÃO DOS FATORES DINÂMICOS
+  # Baseado no código MATLAB DFMest_BLL.m (linhas 52-57)
+  # ===================================================================
+  
+  cat("=== ESTIMAÇÃO DOS FATORES DINÂMICOS ===\n")
+  cat("Número de fatores dinâmicos q:", q, "\n")
+  cat("Número de fatores estáticos r:", r, "\n")
+  
   if (q == r) {
+    # Caso especial: q = r (fatores dinâmicos = fatores estáticos)
+    cat("Caso especial: q = r. Fatores dinâmicos = fatores estáticos.\n")
     K <- diag(r)
     M <- diag(r)
     eta <- var_residuals
   } else {
+    # Caso geral: q < r
+    cat("Extraindo", q, "fatores dinâmicos de", r, "fatores estáticos.\n")
+    
+    # Calcular matriz de covariância dos resíduos VAR
     sigma_u <- cov(var_residuals)
-    eig <- eigen(sigma_u)
-    idx <- order(abs(eig$values), decreasing = TRUE)[1:q]
-    K <- eig$vectors[, idx]
-    M <- diag(sqrt(eig$values[idx]))
+    
+    # Calcular autovalores e autovetores (usando os q maiores autovalores)
+    eigen_result <- eigen(sigma_u, symmetric = TRUE)
+    
+    # Selecionar os q maiores autovalores
+    idx <- order(eigen_result$values, decreasing = TRUE)[1:q]
+    eigenvals <- eigen_result$values[idx]
+    eigenvects <- eigen_result$vectors[, idx]
+    
+    # Construir matrizes K e M conforme MATLAB
+    K <- eigenvects  # Autovetores
+    M <- diag(sqrt(eigenvals))  # Raiz quadrada dos autovalores
+    
+    # Calcular fatores dinâmicos: eta = u * K / M
     eta <- var_residuals %*% K %*% solve(M)
+    
+    cat("Autovalores selecionados:", round(eigenvals, 4), "\n")
+    cat("Proporção da variância explicada pelos fatores dinâmicos:", 
+        round(sum(eigenvals) / sum(eigen_result$values) * 100, 2), "%\n")
   }
+  
+  cat("Dimensões dos fatores dinâmicos eta:", nrow(eta), "x", ncol(eta), "\n")
+  cat("========================================\n")
 
   return(list(
-    factors = eta,
-    K = K,
-    M = M
+    factors = eta,    # Fatores dinâmicos eta
+    K = K,           # Matriz de autovetores
+    M = M,           # Matriz diagonal com raiz dos autovalores
+    eigenvalues = if(q == r) rep(1, r) else eigenvals  # Autovalores para diagnóstico
   ))
 }
 
 
 
 estimate_dfm <- function(data, r, q, p) {
-  # 1. Estimação dos fatores estáticos
+  # ===================================================================
+  # ESTIMAÇÃO COMPLETA DO MODELO DE FATORES DINÂMICOS ESTRUTURAIS (SDFM)
+  # Implementação baseada em Alessi & Kerssenfischer com metodologia BLL
+  # ===================================================================
+  
+  cat("\n")
+  cat("=======================================================\n")
+  cat("    ESTIMAÇÃO DO MODELO DE FATORES DINÂMICOS (SDFM)   \n")
+  cat("=======================================================\n")
+  cat("Parâmetros do modelo:\n")
+  cat("- Número de fatores estáticos (r):", r, "\n")
+  cat("- Número de fatores dinâmicos (q):", q, "\n")
+  cat("- Ordem do VAR (p):", p, "\n")
+  cat("- Dimensões dos dados:", nrow(data), "x", ncol(data), "\n")
+  cat("=======================================================\n")
+
+  # 1. ESTIMAÇÃO DOS FATORES ESTÁTICOS (com padronização BLL corrigida)
+  cat("\nETAPA 1: ESTIMAÇÃO DOS FATORES ESTÁTICOS\n")
   static_result <- estimate_static_factors(data, r)
 
-  # 2. Estimação do VAR com correção de Kilian
+  static_result <- estimate_static_factors(data, r)
+
   var_result <- estimate_corrected_var(static_result$factors, p)
 
-  # 3. Estimação dos fatores dinâmicos
   dynamic_result <- estimate_dynamic_factors(var_result$residuals, q, r)
 
-  # 4. Preparar componentes para IRF
-  companion <- var_result$companion
+  # Diagnostics
+  max_eigenval <- max(abs(eigen(var_result$companion)$values))
+  is_stable <- max_eigenval < 1
+  
+  eta_corr <- cor(dynamic_result$factors)
+  max_corr <- max(abs(eta_corr[upper.tri(eta_corr)]))
+  
+  total_var_static <- sum(static_result$eigenvalues) / sum(eigen(cov(static_result$yy))$values) * 100
+  
+  if (q < r) {
+    total_var_dynamic <- sum(dynamic_result$eigenvalues) / sum(eigen(cov(var_result$residuals))$values) * 100
+  } else {
+    total_var_dynamic <- NA
+  }
 
-  # Retornar todos os componentes necessários
   return(list(
+    # Static factors
     static_factors = static_result$factors,
     static_loadings = static_result$loadings,
+    static_eigenvalues = static_result$eigenvalues,
+    
+    # VAR on static factors
     var_coefficients = var_result$coefficients,
     var_residuals = var_result$residuals,
-    companion_matrix = companion,
+    companion_matrix = var_result$companion,
+    var_covariance = var_result$covariance_matrix,
+    
+    # Dynamic factors
     dynamic_factors = dynamic_result$factors,
     dynamic_loadings = dynamic_result$K,
     dynamic_scaling = dynamic_result$M,
+    dynamic_eigenvalues = dynamic_result$eigenvalues,
+    
+    # Dados transformados e auxiliares
     data_sd = static_result$sy,
-    Z = static_result$Z
+    Z = static_result$Z,
+    yy = static_result$yy,
+    detrended_data = static_result$detrended_data,
+    
+    # Componentes para IRF
+    loadings_lambda = static_result$loadings,  # λ no código MATLAB
+    scaling_matrix_K = dynamic_result$K,       # K no código MATLAB  
+    scaling_matrix_M = dynamic_result$M,       # M no código MATLAB
+    
+    # Diagnósticos
+    diagnostics = list(
+      max_eigenvalue = max_eigenval,
+      is_stable = max_eigenval < 1,
+      max_dynamic_correlation = max_corr,
+      static_variance_explained = total_var_static,
+      dynamic_variance_explained = if(q < r) total_var_dynamic else 100
+    )
   ))
 }
