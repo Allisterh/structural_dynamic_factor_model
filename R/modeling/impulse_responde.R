@@ -14,6 +14,7 @@ compute_irf_dfm <- function(dfm_results, h = 24, nboot = 300, bootstrap_seed = N
   M <- dfm_results$dynamic_scaling
   sy <- dfm_results$data_sd
   p <- dfm_results$p  # Get VAR order from DFM results
+  SIGMA <- dfm_results$var_covariance # Covariance matrix of VAR residuals
 
   # Dimensions
   n_vars <- nrow(Lambda)
@@ -22,6 +23,11 @@ compute_irf_dfm <- function(dfm_results, h = 24, nboot = 300, bootstrap_seed = N
 
   # Point IRF calculation
   
+  # Identification via Cholesky decomposition (lower triangular)
+  # This ensures consistency with MATLAB's chol, which returns upper by default
+  # We use the transpose to get the lower triangular factor
+  S <- t(chol(SIGMA))
+
   # Point IRF
   irf_point <- array(0, dim = c(n_vars, h + 1, q))
   B <- array(0, dim = c(r, r, h + 1))
@@ -33,19 +39,19 @@ compute_irf_dfm <- function(dfm_results, h = 24, nboot = 300, bootstrap_seed = N
   }
 
   # Calculate point IRF using formula
-  # C(:,:,ii)=(lambda*B(:,:,ii)*K*M).*repmat(sy',1,q)
+  # C(:,:,ii)=(lambda*B(:,:,ii)*S*K*M).*repmat(sy',1,q)
   for (i in 1:(h + 1)) {
     if (!is.matrix(K) && !is.matrix(M)) {
       # Case q=r with scalar K,M (K=1, M=1)
       # In this case, q factors but K=1, M=1 so we replicate across q
-      temp <- Re(Lambda %*% B[, , i] * K * M)
+      temp <- Re(Lambda %*% B[, , i] %*% S * K * M)
       for (s in 1:q) {
         # Each dynamic factor gets the same response (since K=1, M=1)
         irf_point[, i, s] <- temp[, s] * sy  # Extract s-th static factor response
       }
     } else {
       # General case with matrix K,M
-      temp <- Re(Lambda %*% B[, , i] %*% K %*% M)
+      temp <- Re(Lambda %*% B[, , i] %*% S %*% K %*% M)
       for (s in 1:q) {
         irf_point[, i, s] <- temp[, s] * sy  # Element-wise multiplication with sy
       }
@@ -57,62 +63,38 @@ compute_irf_dfm <- function(dfm_results, h = 24, nboot = 300, bootstrap_seed = N
     cat("Iniciando wild bootstrap com", nboot, "replicações...\n")
     irf_boot <- array(0, dim = c(n_vars, h + 1, nboot, q))
     
-    # Pre-calculate data reconstruction components
-    T_data <- nrow(dfm_results$Z)
-    regX <- cbind(1, 1:T_data)
-    
-    # Reconstruct original data (reverse BLL transformation)
-    original_data <- sweep(dfm_results$Z, 2, dfm_results$data_sd, "*")
-    
-    # Add back linear trend component
-    trend_data <- matrix(0, T_data, ncol(original_data))
-    for (i in 1:ncol(original_data)) {
-      beta_trend <- solve(crossprod(regX)) %*% crossprod(regX, original_data[, i])
-      trend_data[, i] <- regX %*% beta_trend
-    }
-    original_data <- original_data + trend_data
-    
-    # Calculate common and idiosyncratic components
-    common_components <- dfm_results$static_factors %*% t(dfm_results$static_loadings)
-    common_components_scaled <- sweep(common_components, 2, dfm_results$data_sd, "*")
-    common_components_full <- common_components_scaled + trend_data
-    idiosyncratic <- original_data - common_components_full
-
     # Progress tracking
     pb <- utils::txtProgressBar(min = 0, max = nboot, style = 3)
 
     for (b in 1:nboot) {
       utils::setTxtProgressBar(pb, b)
       
-      # Generate wild bootstrap draw (Rademacher: ±1 with prob 0.5 each)
-      rr <- 1 - 2 * (runif(nrow(dfm_results$var_residuals)) > 0.5)
-      resid_boot <- dfm_results$var_residuals * rr
-      
-      # Reconstruct factors with bootstrapped residuals
-      F_boot <- matrix(0, nrow = nrow(dfm_results$static_factors), ncol = r)
-      F_boot[1:p, ] <- dfm_results$static_factors[1:p, ]
-      
-      for (t in (p + 1):nrow(F_boot)) {
-        lagged_vars <- as.vector(t(F_boot[(t-1):(t-p), ]))
-        F_boot[t, ] <- lagged_vars %*% dfm_results$var_coefficients + resid_boot[t - p, ]
-      }
-      
-      # Reconstruct bootstrapped dataset
-      common_boot <- F_boot %*% t(dfm_results$static_loadings)
-      common_boot_scaled <- sweep(common_boot, 2, dfm_results$data_sd, "*")
-      common_boot_full <- common_boot_scaled + trend_data
-      X_boot <- common_boot_full + idiosyncratic
-      
-      # Re-estimate DFM on bootstrapped data
       tryCatch({
-        dfm_boot <- estimate_dfm(X_boot, r, q, p)
+        # Generate wild bootstrap draw (Rademacher: ±1 with prob 0.5 each)
+        rr <- 1 - 2 * (runif(nrow(dfm_results$var_residuals)) > 0.5)
+        resid_boot <- dfm_results$var_residuals * rr
+        
+        # Reconstruct factors with bootstrapped residuals
+        F_boot <- matrix(0, nrow = nrow(dfm_results$static_factors), ncol = r)
+        F_boot[1:p, ] <- dfm_results$static_factors[1:p, ]
+        
+        for (t in (p + 1):nrow(F_boot)) {
+          lagged_vars <- as.vector(t(F_boot[(t-1):(t-p), ]))
+          F_boot[t, ] <- lagged_vars %*% dfm_results$var_coefficients + resid_boot[t - p, ]
+        }
+        
+        # Re-estimate only the VAR on bootstrapped factors
+        var_boot <- estimate_corrected_var(F_boot, p)
+        
+        # Re-estimate dynamic components from bootstrapped VAR residuals
+        dynamic_boot <- estimate_dynamic_factors(var_boot$residuals, q, r)
         
         # Calculate bootstrapped IRF matrices
-        Lambda_boot <- dfm_boot$static_loadings
-        A_boot <- dfm_boot$companion_matrix
-        K_boot <- dfm_boot$dynamic_loadings
-        M_boot <- dfm_boot$dynamic_scaling
-        sy_boot <- dfm_boot$data_sd
+        A_boot <- var_boot$companion
+        SIGMA_boot <- var_boot$covariance_matrix
+        S_boot <- t(chol(SIGMA_boot)) # Cholesky on bootstrapped covariance
+        K_boot <- dynamic_boot$K
+        M_boot <- dynamic_boot$M
         
         B_boot <- array(0, dim = c(r, r, h + 1))
         B_boot[, , 1] <- diag(r)
@@ -122,23 +104,23 @@ compute_irf_dfm <- function(dfm_results, h = 24, nboot = 300, bootstrap_seed = N
           B_boot[, , i] <- A_boot[1:r, 1:r] %*% B_boot[, , i - 1]
         }
 
-        # Calculate bootstrapped IRFs
+        # Calculate bootstrapped IRFs using original Lambda and sy
         for (i in 1:(h + 1)) {
           if (!is.matrix(K_boot) && !is.matrix(M_boot)) {
-            temp <- Re(Lambda_boot %*% B_boot[, , i] * K_boot * M_boot)
+            temp <- Re(Lambda %*% B_boot[, , i] %*% S_boot * K_boot * M_boot)
             for (s in 1:q) {
-              irf_boot[, i, b, s] <- temp[, s] * sy_boot
+              irf_boot[, i, b, s] <- temp[, s] * sy
             }
           } else {
-            temp <- Re(Lambda_boot %*% B_boot[, , i] %*% K_boot %*% M_boot)
+            temp <- Re(Lambda %*% B_boot[, , i] %*% S_boot %*% K_boot %*% M_boot)
             for (s in 1:q) {
-              irf_boot[, i, b, s] <- temp[, s] * sy_boot
+              irf_boot[, i, b, s] <- temp[, s] * sy
             }
           }
         }
       }, error = function(e) {
         warning("Bootstrap iteration ", b, " failed: ", e$message)
-        # Use point estimates as fallback
+        # Use point estimates as fallback for the failed iteration
         for (s in 1:q) {
           irf_boot[, , b, s] <- irf_point[, , s]
         }
