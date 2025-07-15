@@ -50,6 +50,12 @@ main_sdfm <- function(data_path = "data/processed/final_data.csv",
   # Estimate SDFM
   dfm_results <- estimate_dfm(data, r, q, p)
   
+  # Validate results
+  validation <- validate_dfm_results(dfm_results)
+  if (length(validation$missing_components) > 0) {
+    warning("Missing DFM components: ", paste(validation$missing_components, collapse = ", "))
+  }
+  
   # Compute IRFs
   irf_results <- compute_irf_dfm(dfm_results, h = h, nboot = nboot)
   

@@ -272,7 +272,6 @@ estimate_static_factors <- function(data, r) {
   
   # ===================================================================
   # PADRONIZAÇÃO BLL (Barigozzi, Lippi, Luciani 2016)
-  # Implementação baseada no código MATLAB original DFMest_BLL.m
   # ===================================================================
   
   # 1. Calcular primeira diferença para obter desvio padrão
@@ -342,13 +341,17 @@ construct_companion <- function(coef_mat, n_vars, n_lags) {
 kilian_correction <- function(A, SIGMA, t, q, p) {
   # ===================================================================
   # CORREÇÃO DE VIÉS DE KILIAN (1998)
-  # Implementação baseada no código MATLAB original kiliancorr.m
   # Fonte: Pope (1990), JTSA; Kilian (1998)
   # ===================================================================
   
   T <- t - p  # Tamanho efetivo da amostra
   I <- diag(q * p)  # Matriz identidade
   B <- t(A)  # Transposta da matriz companion
+  
+  # Ensure all matrices are real
+  A <- Re(A)
+  SIGMA <- Re(SIGMA)
+  B <- Re(B)
   
   # Calculate SIGMAY using Lyapunov equation
   A_kron_A <- kronecker(A, A)
@@ -362,7 +365,7 @@ kilian_correction <- function(A, SIGMA, t, q, p) {
   }
   
   vecSIGMAY <- lyapunov_inv %*% c(SIGMA)
-  SIGMAY <- matrix(vecSIGMAY, nrow = q * p, ncol = q * p)
+  SIGMAY <- Re(matrix(vecSIGMAY, nrow = q * p, ncol = q * p))
   
   # Calculate eigenvalues of companion matrix
   peigen <- eigen(A)$values
@@ -419,7 +422,7 @@ kilian_correction <- function(A, SIGMA, t, q, p) {
     iter <- iter + 1
     
     # Ajustar correção proporcionalmente
-    bcA <- A - delta * Abias
+    bcA <- Re(A - delta * Abias)
     
     # Verificar estabilidade (todos os autovalores < 1 em módulo)
     bcmod <- abs(eigen(bcA)$values)
@@ -470,6 +473,9 @@ estimate_corrected_var <- function(data, p) {
   
   # 4. Calcular resíduos
   u <- LHS - RHS %*% bet
+  
+  # Ensure u is numeric
+  u <- Re(as.matrix(u))
   
   # 5. Construir matriz companion (excluindo constante)
   coeffcompanion <- rbind(
@@ -543,7 +549,6 @@ compute_residuals <- function(data, beta, p) {
 estimate_dynamic_factors <- function(var_residuals, q, r) {
   # ===================================================================
   # ESTIMAÇÃO DOS FATORES DINÂMICOS
-  # Baseado no código MATLAB DFMest_BLL.m (linhas 52-57)
   # ===================================================================
   
   cat("=== ESTIMAÇÃO DOS FATORES DINÂMICOS ===\n")
@@ -553,8 +558,8 @@ estimate_dynamic_factors <- function(var_residuals, q, r) {
   if (q == r) {
     # Caso especial: q = r (fatores dinâmicos = fatores estáticos)
     cat("Caso especial: q = r. Fatores dinâmicos = fatores estáticos.\n")
-    K <- diag(r)
-    M <- diag(r)
+    K <- 1
+    M <- 1
     eta <- var_residuals
   } else {
     # Caso geral: q < r
@@ -563,17 +568,15 @@ estimate_dynamic_factors <- function(var_residuals, q, r) {
     # Calcular matriz de covariância dos resíduos VAR
     sigma_u <- cov(var_residuals)
     
-    # Calcular autovalores e autovetores (usando os q maiores autovalores)
+    # Usar eigs: extrair q maiores autovalores
     eigen_result <- eigen(sigma_u, symmetric = TRUE)
-    
-    # Selecionar os q maiores autovalores
     idx <- order(eigen_result$values, decreasing = TRUE)[1:q]
     eigenvals <- eigen_result$values[idx]
     eigenvects <- eigen_result$vectors[, idx]
     
-    # Construir matrizes K e M conforme MATLAB
-    K <- eigenvects  # Autovetores
-    M <- diag(sqrt(eigenvals))  # Raiz quadrada dos autovalores
+    # Construir matrizes K e M
+    K <- eigenvects  # Autovetores (matriz K)
+    M <- diag(sqrt(eigenvals))  # M = diag(sqrt(diag(MM)))
     
     # Calcular fatores dinâmicos: eta = u * K / M
     eta <- var_residuals %*% K %*% solve(M)
@@ -588,8 +591,8 @@ estimate_dynamic_factors <- function(var_residuals, q, r) {
 
   return(list(
     factors = eta,    # Fatores dinâmicos eta
-    K = K,           # Matriz de autovetores
-    M = M,           # Matriz diagonal com raiz dos autovalores
+    K = K,           # Matriz de autovetores (ou escalar se q=r)
+    M = M,           # Matriz diagonal com raiz dos autovalores (ou escalar se q=r)
     eigenvalues = if(q == r) rep(1, r) else eigenvals  # Autovalores para diagnóstico
   ))
 }
@@ -663,9 +666,14 @@ estimate_dfm <- function(data, r, q, p) {
     detrended_data = static_result$detrended_data,
     
     # Componentes para IRF
-    loadings_lambda = static_result$loadings,  # λ no código MATLAB
-    scaling_matrix_K = dynamic_result$K,       # K no código MATLAB  
-    scaling_matrix_M = dynamic_result$M,       # M no código MATLAB
+    loadings_lambda = static_result$loadings,  # λ
+    scaling_matrix_K = dynamic_result$K,       # K
+    scaling_matrix_M = dynamic_result$M,       # M
+    
+    # Parâmetros do modelo
+    p = p,  # Ordem do VAR
+    r = r,  # Número de fatores estáticos
+    q = q,  # Número de fatores dinâmicos
     
     # Diagnósticos
     diagnostics = list(
