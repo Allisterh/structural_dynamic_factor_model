@@ -20,7 +20,7 @@ source("R/modeling/impulse_responde.R")
 #' 
 #' @export
 main_sdfm <- function(data_path = "data/processed/final_data.csv",
-                      r = 7, q = 5, p = 1, h = 50, nboot = 800) {
+                      r = 7, q = 5, p = 1, h = 50, nboot = 800, bootstrap_seed = 123) {
   
   # Load and prepare data
   data <- readr::read_csv(data_path) |>
@@ -56,8 +56,8 @@ main_sdfm <- function(data_path = "data/processed/final_data.csv",
     warning("Missing DFM components: ", paste(validation$missing_components, collapse = ", "))
   }
   
-  # Compute IRFs
-  irf_results <- compute_irf_dfm(dfm_results, h = h, nboot = nboot)
+  # Compute IRFs with wild bootstrap
+  irf_results <- compute_irf_dfm(dfm_results, h = h, nboot = nboot, bootstrap_seed = bootstrap_seed)
   
   return(list(
     model = dfm_results,
