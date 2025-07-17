@@ -1,25 +1,36 @@
 rm(list = ls())
 
+# Load required libraries
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+
 source("R/modeling/factor_estimation.R")
 source("R/modeling/impulse_responde.R")
 
-#' Main SDFM Analysis Function
-#'
-#' @description
-#' Complete implementation of Structural Dynamic Factor Model following 
-#' Alessi & Kerssenfischer (2019) methodology for Brazilian economic data.
-#'
-#' @param data_path Character path to processed data file. Default: "data/processed/final_data.csv"
-#' @param r Integer number of static factors. Default: 7
-#' @param q Integer number of dynamic factors. Default: 5  
-#' @param p Integer VAR lag order. Default: 1
-#' @param h Integer IRF horizon. Default: 50
-#' @param nboot Integer bootstrap replications for IRFs. Default: 800
-#'
-#' @return List containing SDFM estimation results and IRF analysis
-#' 
-#' @export
-main_sdfm <- function(data_path = "data/processed/final_data.csv",
+
+
+X <- readr::read_csv("data/processed/data_log_deseasonalized.csv") |> 
+    dplyr::select(-ref.date) |>
+    tidyr::drop_na()
+
+# Aplicar bai_ng_criteria
+results_bai_ng <- bai_ng_criteria(X, max_r = 20)
+
+# Visualizar o número ótimo de fatores para cada critério
+print(results_bai_ng$r_hat)
+
+# Aplicar amengual_watson com 3 fatores estáticos
+results_amengual_watson <- amengual_watson(X, r = 10, p = 3)
+
+# Visualizar o número estimado de fatores dinâmicos
+print(results_amengual_watson$q_hat)
+
+
+
+main_sdfm <- function(data_path = "data/processed/data_log_deseasonalized.csv",
                       r = 7, q = 5, p = 1, h = 50, nboot = 800, bootstrap_seed = 123) {
   
   # Load and prepare data
@@ -44,7 +55,7 @@ main_sdfm <- function(data_path = "data/processed/final_data.csv",
       dplyr::contains("asset_")
     ) |>
     as.matrix()
-  
+
   colnames(data)[colnames(data) == "retorno_mensal"] <- "ida"
   
   # Estimate SDFM
@@ -58,7 +69,7 @@ main_sdfm <- function(data_path = "data/processed/final_data.csv",
   
   # Compute IRFs with wild bootstrap
   irf_results <- compute_irf_dfm(dfm_results, h = h, nboot = nboot, bootstrap_seed = bootstrap_seed)
-  
+
   return(list(
     model = dfm_results,
     irfs = irf_results,
@@ -66,8 +77,12 @@ main_sdfm <- function(data_path = "data/processed/final_data.csv",
   ))
 }
 
+# Set global seed for reproducibility
+set.seed(123)
+
 # Execute main analysis
 sdfm_results <- main_sdfm()
+
 
 # Generate IRF plots for key economic variables
 response_vars <- list(
@@ -83,13 +98,17 @@ response_vars <- list(
   c("Yield - 5A" = 53)
 )
 
-irf_plot <- plot_irf(sdfm_results$irfs,
+# IRF plots - escolha entre cumulative = TRUE ou FALSE
+irf_plot <- plot_irf(sdfm_results$irfs$irf_ci,
   response_vars = response_vars,
   shock = 3,
-  horizon = 20  
+  horizon = 50,
+  cumulative = FALSE       
 )
 
+print(irf_plot)
+
 # Save plot
-ggplot2::ggsave("img/irf_monetary_shock.png", irf_plot,
-  width = 10, height = 10, dpi = 320
-)
+# ggplot2::ggsave("img/irf_monetary_shock.png", irf_plot,
+#   width = 10, height = 10, dpi = 320
+# )
