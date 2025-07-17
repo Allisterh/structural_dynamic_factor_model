@@ -73,3 +73,4 @@ final_data <- remove_unit_root(data, max_diff = 5)
 
 # Save processed data
 readr::write_csv(final_data$data, "data/processed/final_data.csv")
+readr::write_csv(data, "data/processed/data_log_deseasonalized.csv")

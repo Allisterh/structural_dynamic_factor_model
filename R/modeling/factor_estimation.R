@@ -1,3 +1,5 @@
+# Carregar bibliotecas necessárias
+
 #' Calculate Bai and Ng (2002) Information Criteria for Factor Model Selection
 #'
 #' @description
@@ -265,10 +267,15 @@ scree_analysis <- function(X, max_comp = 15) {
 
 
 
-estimate_static_factors <- function(data, r) {
+estimate_static_factors <- function(data, r, standardized = TRUE, seed = NULL) {
   # Dimensões
   T <- nrow(data)
   N <- ncol(data)
+  
+  # Fixar seed se fornecido para reprodutibilidade absoluta
+  if (!is.null(seed)) {
+    set.seed(seed)
+  }
   
   # ===================================================================
   # PADRONIZAÇÃO BLL (Barigozzi, Lippi, Luciani 2016)
@@ -294,28 +301,50 @@ estimate_static_factors <- function(data, r) {
   Z <- sweep(X, 2, sy, "/")  # Padronização BLL: X / sy
   
   # ===================================================================
-  # EXTRAÇÃO DOS FATORES ESTÁTICOS
+  # EXTRAÇÃO DOS FATORES ESTÁTICOS USANDO SVD NA MATRIZ DE COVARIÂNCIA
   # ===================================================================
   
-  # 5. Calcular autovalores e autovetores da matriz de covariância das diferenças padronizadas
+  # 5. Usar Decomposição SVD na matriz de covariância para garantir determinismo
   cov_yy <- cov(yy)
-  eigen_result <- eigen(cov_yy, symmetric = TRUE)
-  
-  # 6. Selecionar os r maiores autovalores (em ordem decrescente)
-  idx <- order(eigen_result$values, decreasing = TRUE)[1:r]
-  lambda <- eigen_result$vectors[, idx]  # Autovetores (loadings)
+
+  # Use SVD em vez de eigen para maior estabilidade e reprodutibilidade
+  svd_result <- svd(cov_yy)
+
+  # Os autovetores são a matriz U da decomposição SVD
+  eigenvals <- svd_result$d[1:r]
+  lambda <- svd_result$u[, 1:r, drop = FALSE]
+
+  # ...diagnóstico removido...
+
+  # CRÍTICO: Normalização determinística robusta (inspirada em estimate_dynamic_factors)
+  # Garante que os vetores tenham sempre a mesma orientação.
+  for (i in 1:ncol(lambda)) {
+    # Encontra o índice do elemento com o maior valor absoluto no vetor
+    max_abs_idx <- which.max(abs(lambda[, i]))
+    
+    # Se esse elemento específico for negativo, inverte o sinal do VETOR INTEIRO
+    if (lambda[max_abs_idx, i] < 0) {
+      lambda[, i] <- -lambda[, i]
+    }
+  }
   
   # 7. Calcular fatores estáticos: F = Z * lambda
   F <- Z %*% lambda
   
   return(list(
     factors = F,                    # Fatores estáticos F = Z * lambda
-    loadings = lambda,              # Loadings (autovetores)
+    loadings = lambda,              # Loadings (autovetores da SVD)
     sy = sy,                        # Desvios padrão das diferenças
     Z = Z,                          # Dados padronizados BLL
-    eigenvalues = eigen_result$values[idx],  # Autovalores selecionados
+    eigenvalues = eigenvals,        # Autovalores correspondentes aos valores singulares
     yy = yy,                        # Diferenças padronizadas (para diagnóstico)
-    detrended_data = X              # Dados destrendizados (para diagnóstico)
+    detrended_data = X,             # Dados destrendizados (para diagnóstico)
+    # Diagnósticos adicionais
+    diagnostics = list(
+      method = "SVD_covariance",
+      eigenvalues = eigenvals,
+      selected_indices = 1:r  # SVD já ordena automaticamente
+    )
   ))
 }
 
@@ -338,14 +367,17 @@ construct_companion <- function(coef_mat, n_vars, n_lags) {
 }
 
 
-kilian_correction <- function(A, SIGMA, t, q, p) {
+kilian_correction_deterministic <- function(A, SIGMA, t, q, p, seed = 42) {
   # ===================================================================
-  # CORREÇÃO DE VIÉS DE KILIAN (1998)
-  # Fonte: Pope (1990), JTSA; Kilian (1998)
+  # VERSÃO DETERMINÍSTICA DA CORREÇÃO DE KILIAN PARA BOOTSTRAP
   # ===================================================================
   
+  # Fixar seed para reprodutibilidade absoluta
+  set.seed(seed)
+  
   T <- t - p  # Tamanho efetivo da amostra
-  I <- diag(q * p)  # Matriz identidade
+  companion_size <- nrow(A)  # Tamanho real da matriz companion
+  I <- diag(companion_size)  # Matriz identidade do tamanho correto
   B <- t(A)  # Transposta da matriz companion
   
   # Ensure all matrices are real
@@ -353,29 +385,39 @@ kilian_correction <- function(A, SIGMA, t, q, p) {
   SIGMA <- Re(SIGMA)
   B <- Re(B)
   
+  # Para SDFM, SIGMA deve ter dimensão q x q, mas a matriz companion tem dimensão (q*p) x (q*p)
+  # Precisamos expandir SIGMA para a dimensão correta
+  SIGMA_expanded <- matrix(0, companion_size, companion_size)
+  SIGMA_expanded[1:nrow(SIGMA), 1:ncol(SIGMA)] <- SIGMA
+  
   # Calculate SIGMAY using Lyapunov equation
   A_kron_A <- kronecker(A, A)
-  I_full <- diag((q * p)^2)
+  I_full <- diag(companion_size^2)
   
   lyapunov_matrix <- I_full - A_kron_A
-  if (det(lyapunov_matrix) == 0) {
+  lyapunov_det <- det(Re(lyapunov_matrix))
+  
+  if (abs(lyapunov_det) < 1e-10) {
     lyapunov_inv <- MASS::ginv(lyapunov_matrix)
   } else {
     lyapunov_inv <- solve(lyapunov_matrix)
   }
   
-  vecSIGMAY <- lyapunov_inv %*% c(SIGMA)
-  SIGMAY <- Re(matrix(vecSIGMAY, nrow = q * p, ncol = q * p))
+  vecSIGMAY <- lyapunov_inv %*% c(SIGMA_expanded)
+  SIGMAY <- Re(matrix(vecSIGMAY, nrow = companion_size, ncol = companion_size))
   
   # Calculate eigenvalues of companion matrix
   peigen <- eigen(A)$values
   
   # Calculate bias correction terms
-  sumeig <- matrix(0, q * p, q * p)
-  for (h in 1:(q * p)) {
+  sumeig <- matrix(0, companion_size, companion_size)
+  for (h in 1:companion_size) {
     if (abs(1 - peigen[h]) > 1e-10) {
-      term <- peigen[h] * solve(I - peigen[h] * B)
-      sumeig <- sumeig + term
+      I_minus_peigen_B <- I - peigen[h] * B
+      if (abs(det(Re(I_minus_peigen_B))) > 1e-10) {
+        term <- peigen[h] * solve(I_minus_peigen_B)
+        sumeig <- sumeig + term
+      }
     }
   }
   
@@ -383,42 +425,44 @@ kilian_correction <- function(A, SIGMA, t, q, p) {
   I_minus_B <- I - B
   I_minus_B2 <- I - B %*% B
   
-  if (det(I_minus_B) == 0) {
+  det_I_minus_B <- det(Re(I_minus_B))
+  det_I_minus_B2 <- det(Re(I_minus_B2))
+  det_SIGMAY <- det(Re(SIGMAY))
+  
+  if (abs(det_I_minus_B) < 1e-10) {
     inv_I_minus_B <- MASS::ginv(I_minus_B)
   } else {
     inv_I_minus_B <- solve(I_minus_B)
   }
   
-  if (det(I_minus_B2) == 0) {
-    warning("Matriz (I-B^2) é singular. Usando pseudo-inversa.")
+  if (abs(det_I_minus_B2) < 1e-10) {
     inv_I_minus_B2 <- MASS::ginv(I_minus_B2)
   } else {
     inv_I_minus_B2 <- solve(I_minus_B2)
   }
   
-  if (det(SIGMAY) == 0) {
-    warning("Matriz SIGMAY é singular. Usando pseudo-inversa.")
+  if (abs(det_SIGMAY) < 1e-10) {
     inv_SIGMAY <- MASS::ginv(SIGMAY)
   } else {
     inv_SIGMAY <- solve(SIGMAY)
   }
   
-  # Calcular termo do viés
+  # Calcular termo do viés - usar apenas a parte superior esquerda correspondente a SIGMA
   bias_term <- inv_I_minus_B + B %*% inv_I_minus_B2 + sumeig
-  bias <- SIGMA %*% bias_term %*% inv_SIGMAY
+  bias_partial <- SIGMA_expanded %*% bias_term %*% inv_SIGMAY
   
-  # 5. Ajuste do viés (dividido por T conforme Kilian)
-  Abias <- -bias / T
+  # Ajuste do viés (dividido por T conforme Kilian)
+  Abias <- -bias_partial / T
   
-  # 6. Aplicar correção com fator de ajuste delta
+  # Aplicar correção com fator de ajuste delta - DETERMINÍSTICO
   bcstab <- 9  # Valor arbitrário > 1
   delta <- 1   # Fator de ajuste
+  delta_step <- 0.01  # Fixed step size for deterministic behavior
   
-  cat("Aplicando correção iterativa...\n")
   iter <- 0
   max_iter <- 100
   
-  while (bcstab >= 1 && iter < max_iter) {
+  while (bcstab >= 1 && iter < max_iter && delta > 0) {
     iter <- iter + 1
     
     # Ajustar correção proporcionalmente
@@ -426,29 +470,32 @@ kilian_correction <- function(A, SIGMA, t, q, p) {
     
     # Verificar estabilidade (todos os autovalores < 1 em módulo)
     bcmod <- abs(eigen(bcA)$values)
+    max_eigenval <- max(bcmod)
     
     if (any(bcmod >= 1)) {
       bcstab <- 1
+      delta <- delta - delta_step  # Deterministic step
     } else {
       bcstab <- 0
       break
     }
-    
-    delta <- delta - 0.01
-    
-    if (delta <= 0) {
-      bcstab <- 0
-      bcA <- A
-      break
-    }
+  }
+  
+  if (delta <= 0 || bcstab >= 1) {
+    bcA <- A
   }
 
   return(bcA)
 }
 
-
-
-estimate_corrected_var <- function(data, p) {
+estimate_corrected_var_deterministic <- function(data, p, seed = 42) {
+  # ===================================================================
+  # VERSÃO DETERMINÍSTICA DA ESTIMAÇÃO VAR PARA BOOTSTRAP
+  # ===================================================================
+  
+  # Fixar seed para reprodutibilidade absoluta
+  set.seed(seed)
+  
   T <- nrow(data)
   K <- ncol(data)
   
@@ -463,21 +510,23 @@ estimate_corrected_var <- function(data, p) {
   
   # Add constant
   RHS[, K * p + 1] <- 1
-  RHS[, K * p + 1] <- 1
   
-  # 2. Variável dependente
+  # Variável dependente
   LHS <- data[(p + 1):T, ]
   
-  # 3. Estimação por OLS
-  bet <- solve(crossprod(RHS)) %*% crossprod(RHS, LHS)
+  # Estimação por OLS
+  XtX <- crossprod(RHS)
+  XtY <- crossprod(RHS, LHS)
   
-  # 4. Calcular resíduos
+  bet <- solve(XtX) %*% XtY
+  
+  # Calcular resíduos
   u <- LHS - RHS %*% bet
   
   # Ensure u is numeric
   u <- Re(as.matrix(u))
   
-  # 5. Construir matriz companion (excluindo constante)
+  # Construir matriz companion (excluindo constante)
   coeffcompanion <- rbind(
     t(bet[1:(p * K), ]),  # Coeficientes VAR
     cbind(diag((p - 1) * K), matrix(0, (p - 1) * K, K))  # Identidade para lags
@@ -486,14 +535,8 @@ estimate_corrected_var <- function(data, p) {
   # Calculate covariance matrix of residuals
   SIGMA <- cov(u)
   
-  # Apply Kilian correction
-  eigenvals_orig <- eigen(coeffcompanion)$values
-  max_eigen_orig <- max(abs(eigenvals_orig))
-  
-  coeffcompanion_corrected <- kilian_correction(coeffcompanion, SIGMA, T, K, p)
-  
-  eigenvals_corr <- eigen(coeffcompanion_corrected)$values
-  max_eigen_corr <- max(abs(eigenvals_corr))
+  # Apply deterministic Kilian correction
+  coeffcompanion_corrected <- kilian_correction_deterministic(coeffcompanion, SIGMA, T, K, p, seed)
   
   # Extract corrected coefficients
   beta_corrected <- t(coeffcompanion_corrected[1:K, ])
@@ -524,6 +567,230 @@ estimate_corrected_var <- function(data, p) {
   ))
 }
 
+kilian_correction <- function(A, SIGMA, t, q, p) {
+  # ===================================================================
+  # CORREÇÃO DE VIÉS DE KILIAN (1998) - BASEADA NO CÓDIGO MATLAB ORIGINAL
+  # Fonte: Pope (1990), JTSA; Kilian (1997)
+  # Implementação fiel ao código MATLAB original de Lutz Kilian
+  # ===================================================================
+  
+  # Seguindo exatamente o código MATLAB
+  T <- t - p
+  
+  # Calcular SIGMAY usando a equação de Lyapunov
+  # vecSIGMAY = inv(eye((q*p)^2) - kron(A,A)) * vec(SIGMA)
+  I_kron <- diag((q * p)^2)
+  A_kron_A <- kronecker(A, A)
+  lyapunov_matrix <- I_kron - A_kron_A
+  
+  # Verificar se a matriz é invertível
+  if (Mod(det(Re(lyapunov_matrix))) < 1e-12) {
+    lyapunov_inv <- MASS::ginv(Re(lyapunov_matrix))
+  } else {
+    lyapunov_inv <- solve(Re(lyapunov_matrix))
+  }
+  
+  # vec(SIGMA) - vetorizar SIGMA por colunas (como no MATLAB)
+  vec_SIGMA <- as.vector(SIGMA)
+  vecSIGMAY <- lyapunov_inv %*% vec_SIGMA
+  SIGMAY <- matrix(vecSIGMAY, nrow = q * p, ncol = q * p)
+  
+  # Matriz identidade e transposta
+  I <- diag(q * p)
+  B <- t(A)  # B = A' no MATLAB
+  
+  # Calcular autovalores de A
+  peigen <- eigen(A)$values
+  
+  # Calcular sumeig seguindo o loop do MATLAB
+  sumeig <- matrix(0, q * p, q * p)
+  # ...variável não utilizada removida...
+  
+  for (h in 1:(q * p)) {
+    # sumeig = sumeig + (peigen(h) * inv(I - peigen(h) * B))
+    I_minus_peigen_B <- I - peigen[h] * B
+    # Verificar se a matriz é invertível
+    if (Mod(det(Re(I_minus_peigen_B))) > 1e-12) {
+      term <- peigen[h] * solve(Re(I_minus_peigen_B))
+      sumeig <- sumeig + term
+      # variável removida
+    }
+  }
+  
+  # Calcular bias seguindo exatamente o MATLAB
+  # bias = SIGMA * (inv(I-B) + B*inv(I-B^2) + sumeig) * inv(SIGMAY)
+  
+  I_minus_B <- I - B
+  I_minus_B2 <- I - B %*% B
+  
+  # ...diagnóstico removido...
+  
+  # Verificar se as matrizes são invertíveis
+  if (Mod(det(Re(I_minus_B))) < 1e-12) {
+    cat("- AVISO: Usando pseudo-inversa para (I-B)\n")
+    inv_I_minus_B <- MASS::ginv(Re(I_minus_B))
+  } else {
+    inv_I_minus_B <- solve(Re(I_minus_B))
+  }
+  
+  if (abs(det(Re(I_minus_B2))) < 1e-12) {
+    cat("- AVISO: Usando pseudo-inversa para (I-B²)\n")
+    inv_I_minus_B2 <- MASS::ginv(Re(I_minus_B2))
+  } else {
+    inv_I_minus_B2 <- solve(Re(I_minus_B2))
+  }
+  
+  if (abs(det(Re(SIGMAY))) < 1e-12) {
+    cat("- AVISO: Usando pseudo-inversa para SIGMAY\n")
+    inv_SIGMAY <- MASS::ginv(Re(SIGMAY))
+  } else {
+    inv_SIGMAY <- solve(Re(SIGMAY))
+  }
+  
+  # Calcular bias
+  bias_term <- inv_I_minus_B + B %*% inv_I_minus_B2 + sumeig
+  bias <- SIGMA %*% bias_term %*% inv_SIGMAY
+  
+  # ...diagnóstico removido...
+  
+  # Abias = -bias/T
+  Abias <- -bias / T
+  
+  # Loop de correção seguindo exatamente o MATLAB
+  bcstab <- 9  # Valor arbitrário > 1
+  delta <- 1   # Fator de ajuste
+  
+  # ...diagnóstico removido...
+  iter <- 0
+  max_iter <- 100  # Proteção contra loop infinito
+  
+  while (bcstab >= 1 && iter < max_iter) {
+    iter <- iter + 1
+    
+    # bcA = A - delta * Abias
+    bcA <- A - delta * Abias
+    
+    # Verificar estabilidade
+    bcmod <- abs(eigen(bcA)$values)
+    max_eigenval <- max(bcmod)
+    
+    if (any(bcmod >= 1)) {
+      bcstab <- 1
+    } else {
+      bcstab <- 0
+    }
+    
+    # delta = delta - 0.01 (exatamente como no MATLAB)
+    delta <- delta - 0.01
+    
+    if (delta <= 0) {
+      bcstab <- 0
+      # ...diagnóstico removido...
+    }
+    
+    if (iter %% 20 == 0) {
+      # ...diagnóstico removido...
+    }
+  }
+  
+  if (iter >= max_iter) {
+    warning("Kilian correction did not converge within maximum iterations")
+  }
+  
+  return(bcA)
+}
+
+
+
+estimate_corrected_var <- function(data, p) {
+  T <- nrow(data)
+  K <- ncol(data)
+  
+  # Construct regressor matrix
+  RHS <- matrix(NA, T - p, K * p + 1)
+  
+  for (i in 1:p) {
+    start_col <- (i - 1) * K + 1
+    end_col <- i * K
+    RHS[, start_col:end_col] <- data[(p + 1 - i):(T - i), ]
+  }
+  
+  # Add constant
+  RHS[, K * p + 1] <- 1
+  
+  
+  # 2. Variável dependente
+  LHS <- data[(p + 1):T, ]
+  
+  # 3. Estimação por OLS
+  XtX <- crossprod(RHS)
+  XtY <- crossprod(RHS, LHS)
+  
+  bet <- solve(XtX) %*% XtY
+  
+  # 4. Calcular resíduos
+  u <- LHS - RHS %*% bet
+  
+  # Ensure u is numeric
+  u <- Re(as.matrix(u))
+  
+  # 5. Construir matriz companion (excluindo constante)
+  coeffcompanion <- rbind(
+    t(bet[1:(p * K), ]),  # Coeficientes VAR
+    cbind(diag((p - 1) * K), matrix(0, (p - 1) * K, K))  # Identidade para lags
+  )
+  
+  # Calculate covariance matrix of residuals
+  SIGMA <- cov(u)
+  
+  # Apply Kilian correction
+  eigenvals_orig <- eigen(coeffcompanion)$values
+  max_eigen_orig <- max(abs(eigenvals_orig))
+  
+  coeffcompanion_corrected <- kilian_correction(coeffcompanion, SIGMA, T, K, p)
+  
+  eigenvals_corr <- eigen(coeffcompanion_corrected)$values
+  max_eigen_corr <- max(abs(eigenvals_corr))
+  
+  # ...diagnóstico removido...
+  
+  # Extract corrected coefficients
+  beta_corrected <- t(coeffcompanion_corrected[1:K, ])
+  
+  # Recalculate residuals with corrected coefficients
+  Y_resid <- data[(p + 1):T, ]
+  X_resid <- matrix(0, T - p, K * p)
+  
+  for (i in 1:p) {
+    X_resid[, ((i - 1) * K + 1):(i * K)] <- data[(p - i + 1):(T - i), ]
+  }
+  
+  beta_corrected <- as.matrix(Re(beta_corrected))
+  X_resid <- as.matrix(Re(X_resid))
+  Y_resid <- as.matrix(Re(Y_resid))
+  
+  u_corrected <- Y_resid - X_resid %*% beta_corrected
+  u_corrected <- as.matrix(Re(u_corrected))
+  
+  return(list(
+    coefficients = beta_corrected,
+    residuals = u_corrected,
+    companion = coeffcompanion_corrected,
+    residuals_original = u,
+    coefficients_original = t(bet[1:(p * K), ]),
+    companion_original = coeffcompanion,
+    covariance_matrix = SIGMA,
+    # Diagnósticos adicionais
+    diagnostics = list(
+      original_max_eigenval = max_eigen_orig,
+      corrected_max_eigenval = max_eigen_corr,
+      is_stable_original = max_eigen_orig < 1,
+      is_stable_corrected = max_eigen_corr < 1,
+      covariance_det = det(Re(SIGMA))
+    )
+  ))
+}
+
 
 
 compute_residuals <- function(data, beta, p) {
@@ -546,54 +813,115 @@ compute_residuals <- function(data, beta, p) {
 
 
 
-estimate_dynamic_factors <- function(var_residuals, q, r) {
+estimate_dynamic_factors_deterministic <- function(var_residuals, q, r, seed = 42) {
   # ===================================================================
-  # ESTIMAÇÃO DOS FATORES DINÂMICOS
+  # VERSÃO DETERMINÍSTICA DOS FATORES DINÂMICOS PARA BOOTSTRAP
   # ===================================================================
   
-  cat("=== ESTIMAÇÃO DOS FATORES DINÂMICOS ===\n")
-  cat("Número de fatores dinâmicos q:", q, "\n")
-  cat("Número de fatores estáticos r:", r, "\n")
+  # Fixar seed para garantir reprodutibilidade absoluta
+  set.seed(seed)
   
   if (q == r) {
     # Caso especial: q = r (fatores dinâmicos = fatores estáticos)
-    cat("Caso especial: q = r. Fatores dinâmicos = fatores estáticos.\n")
     K <- 1
     M <- 1
     eta <- var_residuals
+    eigenvals <- rep(1, r)
   } else {
     # Caso geral: q < r
-    cat("Extraindo", q, "fatores dinâmicos de", r, "fatores estáticos.\n")
-    
     # Calcular matriz de covariância dos resíduos VAR
     sigma_u <- cov(var_residuals)
     
-    # Usar eigs: extrair q maiores autovalores
-    eigen_result <- eigen(sigma_u, symmetric = TRUE)
-    idx <- order(eigen_result$values, decreasing = TRUE)[1:q]
-    eigenvals <- eigen_result$values[idx]
-    eigenvects <- eigen_result$vectors[, idx]
+    # Usar decomposição SVD ao invés de eigen para garantir determinismo
+    svd_result <- svd(sigma_u)
+    eigenvals_sorted <- sort(svd_result$d, decreasing = TRUE)
+    idx <- order(svd_result$d, decreasing = TRUE)[1:q]
+    eigenvals <- eigenvals_sorted[1:q]
+    eigenvects <- svd_result$u[, idx, drop = FALSE]
+    
+    # CRÍTICO: Normalizar autovetores de forma determinística
+    for (i in 1:ncol(eigenvects)) {
+      # Garantir sinal consistente: fazer o maior elemento absoluto positivo
+      max_abs_idx <- which.max(abs(eigenvects[, i]))
+      if (eigenvects[max_abs_idx, i] < 0) {
+        eigenvects[, i] <- -eigenvects[, i]
+      }
+    }
     
     # Construir matrizes K e M
     K <- eigenvects  # Autovetores (matriz K)
     M <- diag(sqrt(eigenvals))  # M = diag(sqrt(diag(MM)))
     
     # Calcular fatores dinâmicos: eta = u * K / M
-    eta <- var_residuals %*% K %*% solve(M)
-    
-    cat("Autovalores selecionados:", round(eigenvals, 4), "\n")
-    cat("Proporção da variância explicada pelos fatores dinâmicos:", 
-        round(sum(eigenvals) / sum(eigen_result$values) * 100, 2), "%\n")
+    if (q == 1) {
+      # Caso especial para q=1: M é escalar
+      eta <- var_residuals %*% K / as.numeric(M)
+    } else {
+      eta <- var_residuals %*% K %*% solve(M)
+    }
   }
-  
-  cat("Dimensões dos fatores dinâmicos eta:", nrow(eta), "x", ncol(eta), "\n")
-  cat("========================================\n")
 
   return(list(
     factors = eta,    # Fatores dinâmicos eta
     K = K,           # Matriz de autovetores (ou escalar se q=r)
     M = M,           # Matriz diagonal com raiz dos autovalores (ou escalar se q=r)
-    eigenvalues = if(q == r) rep(1, r) else eigenvals  # Autovalores para diagnóstico
+    eigenvalues = eigenvals  # Autovalores para diagnóstico
+  ))
+}
+
+estimate_dynamic_factors <- function(var_residuals, q, r) {
+  # ===================================================================
+  # ESTIMAÇÃO DOS FATORES DINÂMICOS
+  # ===================================================================
+  
+  
+  if (q == r) {
+    # Caso especial: q = r (fatores dinâmicos = fatores estáticos)
+    K <- 1
+    M <- 1
+    eta <- var_residuals
+    eigenvals <- rep(1, r)
+  } else {
+    # Caso geral: q < r
+    # Calcular matriz de covariância dos resíduos VAR
+    sigma_u <- cov(var_residuals)
+    # CRÍTICO: Usar decomposição SVD ao invés de eigen para garantir determinismo
+    svd_result <- svd(sigma_u)
+    eigenvals_sorted <- sort(svd_result$d, decreasing = TRUE)
+    idx <- order(svd_result$d, decreasing = TRUE)[1:q]
+    eigenvals <- eigenvals_sorted[1:q]
+    eigenvects <- svd_result$u[, idx, drop = FALSE]
+    # CRÍTICO: Normalizar autovetores de forma determinística
+    for (i in 1:ncol(eigenvects)) {
+      # Garantir sinal consistente: fazer o maior elemento absoluto positivo
+      max_abs_idx <- which.max(abs(eigenvects[, i]))
+      if (eigenvects[max_abs_idx, i] < 0) {
+        eigenvects[, i] <- -eigenvects[, i]
+      }
+    }
+    # Construir matrizes K e M
+    K <- eigenvects  # Autovetores (matriz K)
+    M <- diag(sqrt(eigenvals))  # M = diag(sqrt(diag(MM)))
+    # Calcular fatores dinâmicos: eta = u * K / M
+    if (q == 1) {
+      # Caso especial para q=1: M é escalar
+      eta <- var_residuals %*% K / as.numeric(M)
+    } else {
+      eta <- var_residuals %*% K %*% solve(M)
+    }
+  }
+  
+  if (q == r) {
+    diagnostics <- list(case = "q_equals_r")
+  } else {
+    diagnostics <- list(case = "q_less_than_r", selected_indices = idx)
+  }
+  return(list(
+    factors = eta,    # Fatores dinâmicos eta
+    K = K,           # Matriz de autovetores (ou escalar se q=r)
+    M = M,           # Matriz diagonal com raiz dos autovalores (ou escalar se q=r)
+    eigenvalues = eigenvals,  # Autovalores para diagnóstico
+    diagnostics = diagnostics
   ))
 }
 
@@ -605,83 +933,55 @@ estimate_dfm <- function(data, r, q, p) {
   # Implementação baseada em Alessi & Kerssenfischer com metodologia BLL
   # ===================================================================
   
-  cat("\n")
-  cat("=======================================================\n")
-  cat("    ESTIMAÇÃO DO MODELO DE FATORES DINÂMICOS (SDFM)   \n")
-  cat("=======================================================\n")
-  cat("Parâmetros do modelo:\n")
-  cat("- Número de fatores estáticos (r):", r, "\n")
-  cat("- Número de fatores dinâmicos (q):", q, "\n")
-  cat("- Ordem do VAR (p):", p, "\n")
-  cat("- Dimensões dos dados:", nrow(data), "x", ncol(data), "\n")
-  cat("=======================================================\n")
-
-  # 1. ESTIMAÇÃO DOS FATORES ESTÁTICOS (com padronização BLL corrigida)
-  cat("\nETAPA 1: ESTIMAÇÃO DOS FATORES ESTÁTICOS\n")
-  static_result <- estimate_static_factors(data, r)
 
   static_result <- estimate_static_factors(data, r)
+  
 
   var_result <- estimate_corrected_var(static_result$factors, p)
 
   dynamic_result <- estimate_dynamic_factors(var_result$residuals, q, r)
-
-  # Diagnostics
+  
   max_eigenval <- max(abs(eigen(var_result$companion)$values))
   is_stable <- max_eigenval < 1
-  
-  eta_corr <- cor(dynamic_result$factors)
-  max_corr <- max(abs(eta_corr[upper.tri(eta_corr)]))
-  
-  total_var_static <- sum(static_result$eigenvalues) / sum(eigen(cov(static_result$yy))$values) * 100
-  
-  if (q < r) {
-    total_var_dynamic <- sum(dynamic_result$eigenvalues) / sum(eigen(cov(var_result$residuals))$values) * 100
-  } else {
-    total_var_dynamic <- NA
-  }
 
   return(list(
     # Static factors
     static_factors = static_result$factors,
     static_loadings = static_result$loadings,
     static_eigenvalues = static_result$eigenvalues,
-    
+
     # VAR on static factors
     var_coefficients = var_result$coefficients,
     var_residuals = var_result$residuals,
     companion_matrix = var_result$companion,
     var_covariance = var_result$covariance_matrix,
-    
+
     # Dynamic factors
     dynamic_factors = dynamic_result$factors,
     dynamic_loadings = dynamic_result$K,
     dynamic_scaling = dynamic_result$M,
     dynamic_eigenvalues = dynamic_result$eigenvalues,
-    
+
     # Dados transformados e auxiliares
     data_sd = static_result$sy,
     Z = static_result$Z,
     yy = static_result$yy,
     detrended_data = static_result$detrended_data,
-    
+
     # Componentes para IRF
     loadings_lambda = static_result$loadings,  # λ
     scaling_matrix_K = dynamic_result$K,       # K
     scaling_matrix_M = dynamic_result$M,       # M
-    
+
     # Parâmetros do modelo
     p = p,  # Ordem do VAR
     r = r,  # Número de fatores estáticos
     q = q,  # Número de fatores dinâmicos
-    
-    # Diagnósticos
+
+    # Diagnósticos consolidados
     diagnostics = list(
       max_eigenvalue = max_eigenval,
-      is_stable = max_eigenval < 1,
-      max_dynamic_correlation = max_corr,
-      static_variance_explained = total_var_static,
-      dynamic_variance_explained = if(q < r) total_var_dynamic else 100
+      is_stable = is_stable
     )
   ))
 }

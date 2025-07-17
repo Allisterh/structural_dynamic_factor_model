@@ -4,8 +4,10 @@ compute_irf_dfm <- function(dfm_results, h = 24, nboot = 300, bootstrap_seed = N
   # COM WILD BOOTSTRAP SEGUINDO GERTLER & KARADI (2015)
   # ===================================================================
   
-  # Set seed for reproducibility
-  set_bootstrap_seed(bootstrap_seed)
+  # Set seed for reproducibility - CRITICAL FIX
+  if (!is.null(bootstrap_seed)) {
+    set.seed(bootstrap_seed)
+  }
   
   # Extract components
   Lambda <- dfm_results$static_loadings
@@ -26,7 +28,9 @@ compute_irf_dfm <- function(dfm_results, h = 24, nboot = 300, bootstrap_seed = N
   # Identification via Cholesky decomposition (lower triangular)
   # This ensures consistency with MATLAB's chol, which returns upper by default
   # We use the transpose to get the lower triangular factor
-  S <- t(chol(SIGMA))
+  # FIXED: Ensure numerical stability and consistency
+  SIGMA_regularized <- SIGMA + diag(1e-12, nrow(SIGMA))  # Add small regularization
+  S <- t(chol(SIGMA_regularized))
 
   # Point IRF
   irf_point <- array(0, dim = c(n_vars, h + 1, q))
@@ -60,14 +64,16 @@ compute_irf_dfm <- function(dfm_results, h = 24, nboot = 300, bootstrap_seed = N
 
   # Wild Bootstrap following Gertler & Karadi (2015) and Alessi & Kerssenfischer methodology
   if (nboot > 0) {
-    cat("Iniciando wild bootstrap com", nboot, "replicações...\n")
     irf_boot <- array(0, dim = c(n_vars, h + 1, nboot, q))
     
-    # Progress tracking
-    pb <- utils::txtProgressBar(min = 0, max = nboot, style = 3)
+    # Progress tracking (comentado para reduzir output)
+    # pb <- utils::txtProgressBar(min = 0, max = nboot, style = 3)
 
     for (b in 1:nboot) {
-      utils::setTxtProgressBar(pb, b)
+      # utils::setTxtProgressBar(pb, b)  # Comentado para reduzir output
+      
+      # Set seed for each bootstrap iteration to ensure reproducibility
+      set.seed(bootstrap_seed + b)
       
       tryCatch({
         # Generate wild bootstrap draw (Rademacher: ±1 with prob 0.5 each)
@@ -83,16 +89,18 @@ compute_irf_dfm <- function(dfm_results, h = 24, nboot = 300, bootstrap_seed = N
           F_boot[t, ] <- lagged_vars %*% dfm_results$var_coefficients + resid_boot[t - p, ]
         }
         
-        # Re-estimate only the VAR on bootstrapped factors
-        var_boot <- estimate_corrected_var(F_boot, p)
+        # Re-estimate only the VAR on bootstrapped factors (DETERMINÍSTICO)
+        var_boot <- estimate_corrected_var_deterministic(F_boot, p, seed = bootstrap_seed + b)
         
         # Re-estimate dynamic components from bootstrapped VAR residuals
-        dynamic_boot <- estimate_dynamic_factors(var_boot$residuals, q, r)
+        dynamic_boot <- estimate_dynamic_factors_deterministic(var_boot$residuals, q, r, seed = bootstrap_seed + b)
         
         # Calculate bootstrapped IRF matrices
         A_boot <- var_boot$companion
         SIGMA_boot <- var_boot$covariance_matrix
-        S_boot <- t(chol(SIGMA_boot)) # Cholesky on bootstrapped covariance
+        # FIXED: Apply same regularization for consistency
+        SIGMA_boot_regularized <- SIGMA_boot + diag(1e-12, nrow(SIGMA_boot))
+        S_boot <- t(chol(SIGMA_boot_regularized)) # Cholesky on bootstrapped covariance
         K_boot <- dynamic_boot$K
         M_boot <- dynamic_boot$M
         
@@ -127,12 +135,9 @@ compute_irf_dfm <- function(dfm_results, h = 24, nboot = 300, bootstrap_seed = N
       })
     }
     
-    close(pb)
-    cat("\nWild bootstrap concluído!\n")
     
     # Validate bootstrap results
     bootstrap_validation <- validate_bootstrap_results(irf_boot, irf_point)
-    cat("Taxa de sucesso do bootstrap:", round(bootstrap_validation$success_rate * 100, 1), "%\n")
 
     # Confidence intervals
     irf_ci <- array(0, dim = c(n_vars, h + 1, 5, q))
@@ -143,6 +148,7 @@ compute_irf_dfm <- function(dfm_results, h = 24, nboot = 300, bootstrap_seed = N
       irf_ci[, , 4, s] <- apply(irf_boot[, , , s], c(1, 2), quantile, probs = 0.90, na.rm = TRUE)
       irf_ci[, , 5, s] <- apply(irf_boot[, , , s], c(1, 2), quantile, probs = 0.95, na.rm = TRUE)
     }
+    
   } else {
     # No bootstrap case - return only point estimates
     irf_ci <- array(0, dim = c(n_vars, h + 1, 5, q))
@@ -155,25 +161,94 @@ compute_irf_dfm <- function(dfm_results, h = 24, nboot = 300, bootstrap_seed = N
     }
   }
 
-  return(irf_ci)
+  return(list(irf_point = irf_point, irf_ci = irf_ci))
 }
 
-plot_irf <- function(irf_results, response_vars, shock = 3, horizon = 20) {
+plot_irf <- function(irf_results, response_vars, shock = 3, horizon = 20, 
+                    cumulative = TRUE, invert_shock = FALSE) {
+  
   # Criar lista para armazenar os plots individuais
   plot_list <- list()
+  
+  # Define transformation codes for Brazilian variables (following MATLAB implementation)
+  # 1 = levels, 2 = first differences, 5 = log differences
+  var_tcodes <- c(
+    39, 2,  # USD/BRL - first differences (exchange rate changes)
+    55, 1,  # Spread-J - levels
+    56, 1,  # Spread-F - levels  
+    33, 5,  # IPCA - log differences (inflation)
+    38, 5,  # IPP - log differences (producer prices)
+    64, 5,  # IBRx-100 - log differences (stock returns)
+    68, 5,  # IMob - log differences (real estate returns)
+    54, 1,  # IDA - levels (interest rate instrument)
+    50, 1,  # Yield 1A - levels
+    53, 1   # Yield 5A - levels
+  )
+  
+  # Create lookup table for tcodes
+  tcode_lookup <- setNames(var_tcodes[seq(2, length(var_tcodes), 2)], 
+                          var_tcodes[seq(1, length(var_tcodes), 2)])
+  
+  # Invert shock sign if requested (useful for identification issues)
+  if (invert_shock) {
+    irf_results[, , , shock] <- -irf_results[, , , shock]
+  }
 
   # Loop através das variáveis de resposta
   for (i in seq_along(response_vars)) {
     var_index <- as.numeric(response_vars[[i]])
     var_name <- names(response_vars[[i]])
+    
+    # Get transformation code for this variable
+    tcode <- tcode_lookup[as.character(var_index)]
+    if (is.na(tcode)) tcode <- 1  # Default to levels if not found
+    
+    # Extract raw IRF data
+    irf_raw <- irf_results[var_index, seq_len(horizon + 1), 3, shock]
+    ic_05_raw <- irf_results[var_index, seq_len(horizon + 1), 1, shock]
+    ic_10_raw <- irf_results[var_index, seq_len(horizon + 1), 2, shock]
+    ic_90_raw <- irf_results[var_index, seq_len(horizon + 1), 4, shock]
+    ic_95_raw <- irf_results[var_index, seq_len(horizon + 1), 5, shock]
+    
+    # Apply cumulative transformation based on tcode (following MATLAB cumimp function)
+    # Only if cumulative = TRUE
+    if (cumulative && tcode == 1) {
+      # Levels - no transformation
+      irf_cum <- irf_raw
+      ic_05_cum <- ic_05_raw
+      ic_10_cum <- ic_10_raw
+      ic_90_cum <- ic_90_raw
+      ic_95_cum <- ic_95_raw
+    } else if (cumulative && tcode == 2) {
+      # First differences - cumulative sum * 100
+      irf_cum <- cumsum(irf_raw) * 100
+      ic_05_cum <- cumsum(ic_05_raw) * 100
+      ic_10_cum <- cumsum(ic_10_raw) * 100
+      ic_90_cum <- cumsum(ic_90_raw) * 100
+      ic_95_cum <- cumsum(ic_95_raw) * 100
+    } else if (cumulative && tcode == 5) {
+      # Log differences - (exp(cumsum(IRF)) - 1) * 100
+      irf_cum <- (exp(cumsum(irf_raw)) - 1) * 100
+      ic_05_cum <- (exp(cumsum(ic_05_raw)) - 1) * 100
+      ic_10_cum <- (exp(cumsum(ic_10_raw)) - 1) * 100
+      ic_90_cum <- (exp(cumsum(ic_90_raw)) - 1) * 100
+      ic_95_cum <- (exp(cumsum(ic_95_raw)) - 1) * 100
+    } else {
+      # No cumulative transformation - use raw IRFs
+      irf_cum <- irf_raw
+      ic_05_cum <- ic_05_raw
+      ic_10_cum <- ic_10_raw
+      ic_90_cum <- ic_90_raw
+      ic_95_cum <- ic_95_raw
+    }
 
     df_plot <- data.frame(
       tempo = seq_len(horizon + 1) - 1,
-      irf = irf_results[var_index, seq_len(horizon + 1), 3, shock],
-      ic_05 = irf_results[var_index, seq_len(horizon + 1), 1, shock],
-      ic_10 = irf_results[var_index, seq_len(horizon + 1), 2, shock],
-      ic_90 = irf_results[var_index, seq_len(horizon + 1), 4, shock],
-      ic_95 = irf_results[var_index, seq_len(horizon + 1), 5, shock]
+      irf = irf_cum,
+      ic_05 = ic_05_cum,
+      ic_10 = ic_10_cum,
+      ic_90 = ic_90_cum,
+      ic_95 = ic_95_cum
     )
 
     plot_list[[i]] <- ggplot2::ggplot(df_plot, ggplot2::aes(x = tempo)) +
@@ -349,14 +424,6 @@ wild_bootstrap_dfm <- function(dfm_results, nboot, r, q, p) {
   return(bootstrap_results)
 }
 
-#' Set seed for reproducible wild bootstrap
-#' @param seed Integer seed value
-set_bootstrap_seed <- function(seed = NULL) {
-  if (!is.null(seed)) {
-    set.seed(seed)
-    cat("Bootstrap seed definido para:", seed, "\n")
-  }
-}
 
 #' Validate wild bootstrap results
 #' @param irf_boot Array of bootstrap IRF results
